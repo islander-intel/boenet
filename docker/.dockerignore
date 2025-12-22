@@ -1,0 +1,332 @@
+# ============================================================================
+# BFSNet Docker Build Context Exclusions
+# ============================================================================
+# This file specifies which files and directories should be excluded from
+# the Docker build context to speed up builds and reduce image size.
+#
+# Place this file in the docker/ directory and reference it with:
+#   docker build -f docker/Dockerfile .
+#
+# Or copy to project root as .dockerignore for default behavior.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Git
+# ----------------------------------------------------------------------------
+.git
+.gitignore
+.gitattributes
+.github
+.gitlab-ci.yml
+
+# ----------------------------------------------------------------------------
+# Python
+# ----------------------------------------------------------------------------
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.conda/
+conda-env/
+Pipfile.lock
+poetry.lock
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytest_cache/
+
+# mypy / type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# ----------------------------------------------------------------------------
+# Data and Model Files (Large Files)
+# ----------------------------------------------------------------------------
+# Dataset directories
+data/
+datasets/
+FashionMNIST/
+MNIST/
+
+# Model checkpoints and weights
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+checkpoints/
+saved_models/
+models/
+
+# Training outputs and logs
+runs/
+outputs/
+results/
+experiments/
+logs/
+*.log
+
+# TensorBoard
+tensorboard/
+tb_logs/
+lightning_logs/
+
+# Weights & Biases
+wandb/
+*.wandb
+
+# MLflow
+mlruns/
+mlflow/
+
+# Large data files
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.bin
+*.pkl
+*.pickle
+*.npy
+*.npz
+
+# ----------------------------------------------------------------------------
+# IDE / Editor
+# ----------------------------------------------------------------------------
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.vim/
+
+# Emacs
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Spyder
+.spyderproject
+.spyproject
+
+# ----------------------------------------------------------------------------
+# Operating System
+# ----------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ----------------------------------------------------------------------------
+# Docker (Prevent Recursive Inclusion)
+# ----------------------------------------------------------------------------
+# Don't include Docker files in build context (except Dockerfiles)
+docker-compose*.yml
+docker-compose*.yaml
+!docker/Dockerfile
+!docker/Dockerfile.*
+
+# ----------------------------------------------------------------------------
+# Documentation and Non-Essential Files
+# ----------------------------------------------------------------------------
+# Documentation
+docs/
+*.md
+!README.md
+LICENSE
+CHANGELOG
+CONTRIBUTING
+AUTHORS
+
+# Images and figures (unless needed in container)
+figures/
+images/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.pdf
+*.eps
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# ----------------------------------------------------------------------------
+# Testing (Optional - Comment Out if Tests Needed in Container)
+# ----------------------------------------------------------------------------
+# Uncomment these if you don't need tests in the container:
+# tests/
+# test_*.py
+# *_test.py
+# conftest.py
+
+# ----------------------------------------------------------------------------
+# CI/CD Configuration
+# ----------------------------------------------------------------------------
+.travis.yml
+.circleci/
+Jenkinsfile
+azure-pipelines.yml
+.drone.yml
+appveyor.yml
+tox.ini
+Makefile
+
+# ----------------------------------------------------------------------------
+# Project-Specific Exclusions
+# ----------------------------------------------------------------------------
+# Benchmark results
+bench_results/
+*.bench
+
+# Visualization outputs
+# figures/  # Already excluded above
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Secrets and credentials (NEVER include in images!)
+*.key
+*.pem
+*.secret
+secrets.yaml
+secrets.yml
+credentials.yaml
+credentials.yml
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# Local configuration overrides
+config.local.yaml
+config.local.yml
+*.local.yaml
+*.local.yml
+
+# ----------------------------------------------------------------------------
+# Keep These Files (Negation Patterns)
+# ----------------------------------------------------------------------------
+# Essential Python files
+!*.py
+!requirements.txt
+!requirements-dev.txt
+!setup.py
+!setup.cfg
+!pyproject.toml
+
+# Essential config files
+!configs/
+!configs/**/*.yaml
+!configs/**/*.yml
+
+# Package init files
+!**/__init__.py
+
+# Scripts directory
+!scripts/
+!scripts/*.py
+
+# Loss and utility modules
+!losses/
+!losses/*.py
+!utils/
+!utils/*.py

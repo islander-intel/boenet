@@ -1,0 +1,111 @@
+# ============================================================================
+# BFSNet Dense Baseline Configuration (K=0 Only)
+# ============================================================================
+# This configuration runs ONLY the dense MLP baseline (K=0, no branching).
+# Use this to establish baseline metrics before comparing with BFS variants.
+#
+# With K=0:
+# - Model reduces to: root_fc → ReLU → output_fc (standard MLP)
+# - No branching gate decisions
+# - No warmup needed (warmup_epochs forced to 0)
+# - Fastest training per epoch
+#
+# Usage:
+#   python bfs_training_matrix.py --config configs/examples/dense-baseline.yaml \
+#       --infer_script infer_fmnist_bfs.py
+#
+# Estimated runs: 72 runs (with 3 repeats)
+# Estimated time: 1-2 hours
+# ============================================================================
+
+sweep:
+  # --------------------------------------------------------------------------
+  # Dense Baseline Only (K=0)
+  # --------------------------------------------------------------------------
+  
+  # K=0 means no branching - standard MLP
+  k_values: [0]
+  
+  # Depth doesn't matter much for K=0, but test both
+  max_depths: [2, 3]
+  
+  # Test multiple hidden dimensions
+  hidden_dims: [64, 128, 256]
+  
+  # Pooling doesn't affect K=0 much, use learned as default
+  # (K=0 only has root node, so pooling just returns root features)
+  poolings: [learned]
+  
+  # --------------------------------------------------------------------------
+  # Temperature (doesn't affect K=0, but required)
+  # --------------------------------------------------------------------------
+  
+  # Temperature schedules don't affect K=0 (no branching decisions)
+  temp_schedules: [none]
+  
+  # Fixed temperature (ignored for K=0)
+  fixed_temps: [1.0]
+  
+  # Not used for K=0
+  cosine_anneal:
+    - "1.0->1.0"
+  
+  # --------------------------------------------------------------------------
+  # Optimization - Full Sweep
+  # --------------------------------------------------------------------------
+  
+  # Learning rates to sweep
+  lrs: [0.001, 0.0025, 0.005]
+  
+  # Batch sizes to sweep
+  batch_sizes: [64, 128]
+  
+  # Weight decay options
+  weight_decays: [0.0, 0.01]
+  
+  # --------------------------------------------------------------------------
+  # Training Schedule
+  # --------------------------------------------------------------------------
+  
+  # Warmup is always 0 for K=0 (no soft_full phase needed)
+  warmup_epochs_list: [0]
+
+# ============================================================================
+# Training Settings
+# ============================================================================
+training:
+  # Standard epoch count
+  epochs: 15
+  
+  # Multiple repeats for statistical significance
+  repeats: 3
+  
+  # Base seed
+  seed0: 42
+
+# ============================================================================
+# Inference Settings
+# ============================================================================
+inference:
+  # Full test set evaluation
+  infer_samples: 1000
+  
+  # CPU for fair comparison
+  cpu_only: true
+  
+  # Sparse mode (same as soft_full for K=0)
+  infer_force_exec: sparse
+
+# ============================================================================
+# Paths
+# ============================================================================
+paths:
+  # Output directory
+  save_root: runs/dense_baseline
+  
+  # Dataset
+  data_root: ./data
+  
+  # Scripts
+  train_script: train_fmnist_bfs.py
+  infer_script: infer_fmnist_bfs.py

@@ -1,0 +1,110 @@
+# ============================================================================
+# BFSNet Small Sweep Configuration (Quick Validation)
+# ============================================================================
+# This configuration defines a small but meaningful hyperparameter sweep.
+# Use this for:
+# - Quick validation of code changes
+# - Initial exploration before full sweep
+# - Debugging training issues
+# - Fast iteration during development
+#
+# Includes both K=0 (baseline) and K=2,3 (branching) for comparison.
+#
+# Usage:
+#   python bfs_training_matrix.py --config configs/examples/small-sweep.yaml \
+#       --infer_script infer_fmnist_bfs.py
+#
+# Estimated runs: 48-96 runs (depending on warmup combinations)
+# Estimated time: 30 minutes to 2 hours
+# ============================================================================
+
+sweep:
+  # --------------------------------------------------------------------------
+  # Model Architecture (Small Set)
+  # --------------------------------------------------------------------------
+  
+  # Test dense baseline and two branching configurations
+  k_values: [0, 2, 3]
+  
+  # Single depth for speed
+  max_depths: [2]
+  
+  # Two hidden dimensions
+  hidden_dims: [64, 128]
+  
+  # Compare learned vs mean pooling
+  poolings: [learned, mean]
+  
+  # --------------------------------------------------------------------------
+  # Temperature (Focused Set)
+  # --------------------------------------------------------------------------
+  
+  # Test both schedules
+  temp_schedules: [cosine, none]
+  
+  # Single fixed temperature
+  fixed_temps: [1.0]
+  
+  # Single cosine schedule
+  cosine_anneal:
+    - "1.4->1.0"
+  
+  # --------------------------------------------------------------------------
+  # Optimization (Focused Set)
+  # --------------------------------------------------------------------------
+  
+  # Two learning rates
+  lrs: [0.001, 0.0025]
+  
+  # Single batch size
+  batch_sizes: [128]
+  
+  # Test with and without weight decay
+  weight_decays: [0.0, 0.01]
+  
+  # --------------------------------------------------------------------------
+  # Training Schedule
+  # --------------------------------------------------------------------------
+  
+  # Test one warmup setting (3 epochs is typical)
+  warmup_epochs_list: [3]
+
+# ============================================================================
+# Training Settings
+# ============================================================================
+training:
+  # Moderate epoch count
+  epochs: 10
+  
+  # Single repeat for speed (increase for final results)
+  repeats: 1
+  
+  # Base seed
+  seed0: 42
+
+# ============================================================================
+# Inference Settings
+# ============================================================================
+inference:
+  # Moderate sample count
+  infer_samples: 500
+  
+  # CPU for consistency
+  cpu_only: true
+  
+  # Sparse inference
+  infer_force_exec: sparse
+
+# ============================================================================
+# Paths
+# ============================================================================
+paths:
+  # Output directory
+  save_root: runs/small_sweep
+  
+  # Dataset
+  data_root: ./data
+  
+  # Scripts
+  train_script: train_fmnist_bfs.py
+  infer_script: infer_fmnist_bfs.py

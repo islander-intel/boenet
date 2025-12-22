@@ -1,0 +1,138 @@
+# ============================================================================
+# BoeNet Project Requirements (v1.0.0 - Language Model)
+# ============================================================================
+# Install with: pip install -r requirements.txt
+# For development: pip install -r requirements.txt -r requirements-dev.txt
+#
+# Converted from BFSNet (Vision) to BoeNet (Language)
+# ---------------------------------------------------
+# Key Changes:
+#   - ADDED: datasets (HuggingFace) for Shakespeare/TinyStories
+#   - UPDATED: Comments for language model usage
+#   - UNCHANGED: All other dependencies
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Core Deep Learning
+# ----------------------------------------------------------------------------
+# PyTorch - Core framework for BoeNet
+# Install appropriate version for your CUDA setup:
+#   CPU only:    pip install torch torchvision
+#   CUDA 11.8:   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#   CUDA 12.1:   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#   CUDA 12.8:   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+torch>=1.9.0
+torchvision>=0.10.0
+
+# ----------------------------------------------------------------------------
+# Data Processing
+# ----------------------------------------------------------------------------
+# NumPy - Numerical computing
+numpy>=1.19.0
+
+# Pandas - Data manipulation (for results analysis)
+pandas>=1.3.0
+
+# HuggingFace Datasets - REQUIRED for Shakespeare/TinyStories datasets
+# This is used by boenet/utils/data_utils.py to load text datasets
+# Without this, you'll get: ImportError: HuggingFace datasets library not available
+datasets>=2.14.0
+
+# ----------------------------------------------------------------------------
+# Visualization
+# ----------------------------------------------------------------------------
+# Matplotlib - Plotting and visualization
+matplotlib>=3.4.0
+
+# NetworkX - Graph visualization for BFS tree diagrams (optional but recommended)
+networkx>=2.6.0
+
+# Seaborn - Statistical visualization (optional, for results analysis)
+seaborn>=0.11.0
+
+# ----------------------------------------------------------------------------
+# Configuration
+# ----------------------------------------------------------------------------
+# PyYAML - YAML config file support for boenet_training_matrix.py
+pyyaml>=5.4.0
+
+# ----------------------------------------------------------------------------
+# Progress & Logging
+# ----------------------------------------------------------------------------
+# tqdm - Progress bars for training loops
+tqdm>=4.60.0
+
+# ----------------------------------------------------------------------------
+# Experiment Tracking (Optional)
+# ----------------------------------------------------------------------------
+# Uncomment the ones you want to use:
+
+# TensorBoard - Training visualization
+# tensorboard>=2.6.0
+
+# Weights & Biases - Experiment tracking
+# wandb>=0.12.0
+
+# MLflow - ML lifecycle management
+# mlflow>=1.20.0
+
+# ----------------------------------------------------------------------------
+# Testing (Optional - move to requirements-dev.txt for production)
+# ----------------------------------------------------------------------------
+# pytest - Testing framework
+pytest>=6.2.0
+
+# pytest-cov - Coverage reporting
+pytest-cov>=2.12.0
+
+# ----------------------------------------------------------------------------
+# Code Quality (Optional - move to requirements-dev.txt for production)
+# ----------------------------------------------------------------------------
+# black - Code formatting
+# black>=21.0
+
+# isort - Import sorting
+# isort>=5.9.0
+
+# flake8 - Linting
+# flake8>=3.9.0
+
+# mypy - Static type checking
+# mypy>=0.910
+
+# ----------------------------------------------------------------------------
+# Jupyter (Optional)
+# ----------------------------------------------------------------------------
+# Uncomment if you want Jupyter notebook support:
+# jupyter>=1.0.0
+# jupyterlab>=3.0.0
+# ipywidgets>=7.6.0
+
+# ----------------------------------------------------------------------------
+# Additional Utilities
+# ----------------------------------------------------------------------------
+# Pillow - Image processing (required by torchvision)
+Pillow>=8.0.0
+
+# scipy - Scientific computing (useful for statistical analysis)
+scipy>=1.7.0
+
+# scikit-learn - ML utilities (for metrics, data splitting)
+scikit-learn>=0.24.0
+
+# ----------------------------------------------------------------------------
+# Language Model Specific (BoeNet)
+# ----------------------------------------------------------------------------
+# The following are used specifically for BoeNet language modeling:
+#
+# - datasets: Load Shakespeare, TinyStories from HuggingFace Hub
+# - tqdm: Progress bars during training and inference
+# - pyyaml: Configuration files for experiment sweeps
+# - pandas: Results analysis (matrix_results.csv)
+#
+# For text generation features:
+# - Temperature sampling
+# - Top-k sampling
+# - Top-p (nucleus) sampling
+# All implemented in pure PyTorch, no additional dependencies needed.
+# ----------------------------------------------------------------------------

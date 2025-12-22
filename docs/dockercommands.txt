@@ -1,0 +1,8 @@
+docker build -t bfsnet:cuda -f docker/Dockerfile.cuda .
+
+docker run -d --gpus all     --name bfsnet_phase1     -v $(pwd)/data:/app/data     -v $(pwd)/runs:/app/runs     -v $(pwd)/configs:/app/configs     bfsnet:cuda python bfs_training_matrix.py         --config configs/experiment-config.yaml         --infer_script infer_fmnist_bfs.py
+
+docker logs -f bfsnet_phase1
+
+docker rm -f bfsnet_phase1
+

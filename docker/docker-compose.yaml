@@ -1,0 +1,359 @@
+# ============================================================================
+# BFSNet Docker Compose Configuration
+# ============================================================================
+# Service orchestration for BFSNet training, inference, and testing.
+#
+# Usage:
+#   # CPU training
+#   docker-compose -f docker/docker-compose.yaml up bfsnet-cpu
+#
+#   # GPU training
+#   docker-compose -f docker/docker-compose.yaml up bfsnet-gpu
+#
+#   # Run training matrix
+#   docker-compose -f docker/docker-compose.yaml run bfsnet-matrix-cpu
+#
+#   # Run tests
+#   docker-compose -f docker/docker-compose.yaml run bfsnet-test
+#
+#   # Stop all services
+#   docker-compose -f docker/docker-compose.yaml down
+# ============================================================================
+
+version: "3.8"
+
+# ============================================================================
+# Common Configuration (YAML Anchors)
+# ============================================================================
+x-common-env: &common-env
+  BFSNET_DATA_ROOT: /app/data
+  BFSNET_RUNS_ROOT: /app/runs
+  BFSNET_CONFIG: /app/configs/experiment-config.yaml
+  BFSNET_LOG_LEVEL: INFO
+  PYTHONUNBUFFERED: "1"
+
+x-common-volumes: &common-volumes
+  - ../data:/app/data
+  - ../runs:/app/runs
+  - ../configs:/app/configs
+  - ../figures:/app/figures
+
+x-cpu-settings: &cpu-settings
+  OMP_NUM_THREADS: "4"
+  MKL_NUM_THREADS: "4"
+  NUMEXPR_NUM_THREADS: "4"
+  OPENBLAS_NUM_THREADS: "4"
+  BFSNET_DEVICE: cpu
+
+x-gpu-settings: &gpu-settings
+  NVIDIA_VISIBLE_DEVICES: all
+  NVIDIA_DRIVER_CAPABILITIES: compute,utility
+  BFSNET_DEVICE: auto
+
+# ============================================================================
+# Services
+# ============================================================================
+services:
+  # --------------------------------------------------------------------------
+  # CPU Training Service
+  # --------------------------------------------------------------------------
+  bfsnet-cpu:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: bfsnet:cpu
+    container_name: bfsnet-cpu
+    hostname: bfsnet-cpu
+    restart: "no"
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+        reservations:
+          cpus: "2"
+          memory: 4G
+    
+    # Shared memory for DataLoader workers
+    shm_size: "2gb"
+    
+    # Environment
+    environment:
+      <<: *common-env
+      <<: *cpu-settings
+    
+    # Volumes
+    volumes: *common-volumes
+    
+    # Default command: show help
+    command: python train_fmnist_bfs.py --help
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import torch; print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------------------------------------------------------------
+  # GPU Training Service
+  # --------------------------------------------------------------------------
+  bfsnet-gpu:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cuda
+    image: bfsnet:cuda
+    container_name: bfsnet-gpu
+    hostname: bfsnet-gpu
+    restart: "no"
+    
+    # GPU configuration
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # Shared memory for DataLoader workers
+    shm_size: "4gb"
+    
+    # Environment
+    environment:
+      <<: *common-env
+      <<: *gpu-settings
+    
+    # Volumes
+    volumes: *common-volumes
+    
+    # Default command
+    command: python train_fmnist_bfs.py --help
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import torch; assert torch.cuda.is_available(); print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------------------------------------------------------------
+  # Training Matrix (CPU)
+  # --------------------------------------------------------------------------
+  bfsnet-matrix-cpu:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: bfsnet:cpu
+    container_name: bfsnet-matrix-cpu
+    hostname: bfsnet-matrix-cpu
+    restart: "no"
+    
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 16G
+    
+    shm_size: "4gb"
+    
+    environment:
+      <<: *common-env
+      <<: *cpu-settings
+      OMP_NUM_THREADS: "2"  # Lower threads per run for parallel matrix
+    
+    volumes: *common-volumes
+    
+    # Run training matrix with test config
+    command: >
+      python bfs_training_matrix.py
+      --config /app/configs/test-config.yaml
+      --infer_script infer_fmnist_bfs.py
+      --cpu_only
+
+  # --------------------------------------------------------------------------
+  # Training Matrix (GPU)
+  # --------------------------------------------------------------------------
+  bfsnet-matrix-gpu:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cuda
+    image: bfsnet:cuda
+    container_name: bfsnet-matrix-gpu
+    hostname: bfsnet-matrix-gpu
+    restart: "no"
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    shm_size: "8gb"
+    
+    environment:
+      <<: *common-env
+      <<: *gpu-settings
+    
+    volumes: *common-volumes
+    
+    # Run training matrix with experiment config
+    command: >
+      python bfs_training_matrix.py
+      --config /app/configs/experiment-config.yaml
+      --infer_script infer_fmnist_bfs.py
+
+  # --------------------------------------------------------------------------
+  # Test Service
+  # --------------------------------------------------------------------------
+  bfsnet-test:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: bfsnet:cpu
+    container_name: bfsnet-test
+    hostname: bfsnet-test
+    restart: "no"
+    
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+    
+    shm_size: "2gb"
+    
+    environment:
+      <<: *common-env
+      <<: *cpu-settings
+      BFSNET_LOG_LEVEL: DEBUG
+    
+    volumes:
+      - ..:/app
+    
+    # Run pytest
+    command: pytest tests/ -v --tb=short
+
+  # --------------------------------------------------------------------------
+  # Benchmark Service
+  # --------------------------------------------------------------------------
+  bfsnet-bench:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cuda
+    image: bfsnet:cuda
+    container_name: bfsnet-bench
+    hostname: bfsnet-bench
+    restart: "no"
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    shm_size: "4gb"
+    
+    environment:
+      <<: *common-env
+      <<: *gpu-settings
+    
+    volumes: *common-volumes
+    
+    # Run benchmark
+    command: >
+      python scripts/bench_sparse_vs_dense.py
+      --batches 32 64 128 256
+      --depths 2 3 4
+      --children 2 3 4
+      --trials 10
+
+  # --------------------------------------------------------------------------
+  # Visualization Service
+  # --------------------------------------------------------------------------
+  bfsnet-viz:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: bfsnet:cpu
+    container_name: bfsnet-viz
+    hostname: bfsnet-viz
+    restart: "no"
+    
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+    
+    environment:
+      <<: *common-env
+      <<: *cpu-settings
+      MPLBACKEND: Agg  # Non-interactive matplotlib backend
+    
+    volumes: *common-volumes
+    
+    # Run visualization
+    command: >
+      python visualize_bfs.py
+      --dataset fashionmnist
+      --max_depth 2
+      --max_children 3
+      --save /app/figures/bfs_tree.png
+
+  # --------------------------------------------------------------------------
+  # Interactive Development Shell
+  # --------------------------------------------------------------------------
+  bfsnet-dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: bfsnet:cpu
+    container_name: bfsnet-dev
+    hostname: bfsnet-dev
+    restart: "no"
+    stdin_open: true
+    tty: true
+    
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+    
+    shm_size: "2gb"
+    
+    environment:
+      <<: *common-env
+      <<: *cpu-settings
+      BFSNET_LOG_LEVEL: DEBUG
+    
+    # Mount full project for development
+    volumes:
+      - ..:/app
+    
+    # Interactive bash shell
+    command: bash
+
+# ============================================================================
+# Networks
+# ============================================================================
+networks:
+  default:
+    name: bfsnet-network
+    driver: bridge
+
+# ============================================================================
+# Volumes (Named Volumes for Persistence)
+# ============================================================================
+volumes:
+  bfsnet-data:
+    name: bfsnet-data
+  bfsnet-runs:
+    name: bfsnet-runs

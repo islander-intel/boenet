@@ -1,0 +1,522 @@
+# ============================================================================
+# BoeNet CUDA Dockerfile (v1.0.0 - Language Model)
+# ============================================================================
+# GPU-enabled container for accelerated training and inference.
+#
+# Converted from BFSNet (Vision) to BoeNet (Language)
+# ---------------------------------------------------
+# Key Changes:
+#   - RENAMED: All bfsnet references → boenet
+#   - RENAMED: train_fmnist_bfs.py → train_boenet.py
+#   - RENAMED: infer_fmnist_bfs.py → infer_boenet.py
+#   - RENAMED: bfs_training_matrix.py → boenet_training_matrix.py
+#   - RENAMED: Environment variables BFSNET_* → BOENET_*
+#   - ADDED: datasets library for HuggingFace Shakespeare/TinyStories
+#   - UPDATED: Labels and descriptions for language model
+#   - UNCHANGED: All CUDA/PyTorch configuration
+#
+# Build:
+#   docker build -t boenet:cuda -f docker/Dockerfile.cuda .
+#
+# Run (foreground):
+#   docker run --rm --gpus all \
+#       -v $(pwd)/data:/app/data -v $(pwd)/runs:/app/runs \
+#       boenet:cuda python train_boenet.py --epochs 10 --dataset shakespeare
+#
+# Run in Background (detached mode - survives terminal close/sleep):
+#   docker run -d --gpus all \
+#       --name boenet_training \
+#       -v $(pwd)/data:/app/data \
+#       -v $(pwd)/runs:/app/runs \
+#       -v $(pwd)/configs:/app/configs \
+#       boenet:cuda python boenet_training_matrix.py \
+#           --config configs/experiment-config.yaml \
+#           --infer_script infer_boenet.py
+#
+# Monitor Background Run:
+#   docker logs -f boenet_training         # Follow live output
+#   docker logs --tail 50 boenet_training  # Last 50 lines
+#   docker ps                              # Check if still running
+#
+# Stop Background Run:
+#   docker stop boenet_training            # Graceful stop
+#   docker rm boenet_training              # Remove container
+#   docker rm -f boenet_training           # Force stop and remove
+#
+# Text Generation (interactive):
+#   docker run --rm -it --gpus all \
+#       -v $(pwd)/runs:/app/runs \
+#       boenet:cuda python infer_boenet.py \
+#           --ckpt runs/checkpoint.pt \
+#           --generate --prompt "Once upon a time" \
+#           --max_tokens 200 --temperature 0.8
+#
+# Multi-GPU:
+#   docker run --rm --gpus '"device=0,1"' \
+#       -v $(pwd)/data:/app/data -v $(pwd)/runs:/app/runs \
+#       boenet:cuda python train_boenet.py --dataset tinystories
+#
+# Interactive:
+#   docker run --rm -it --gpus all -v $(pwd):/app boenet:cuda bash
+#
+# Requirements:
+#   - NVIDIA GPU with CUDA support
+#   - NVIDIA Container Toolkit (nvidia-docker2)
+#   - Docker 19.03+ with GPU support
+#   - NVIDIA Driver with CUDA >= 12.8 support (driver 570.x+ recommended)
+#
+# Supported GPU Architectures:
+#   - Pascal (GTX 10 series) - Compute Capability 6.x (sm_60, sm_61)
+#   - Volta (Titan V, Quadro GV100) - Compute Capability 7.0 (sm_70)
+#   - Turing (RTX 20 series) - Compute Capability 7.5 (sm_75)
+#   - Ampere (RTX 30 series, A100) - Compute Capability 8.x (sm_80, sm_86)
+#   - Ada Lovelace (RTX 40 series) - Compute Capability 8.9 (sm_89)
+#   - Hopper (H100) - Compute Capability 9.0 (sm_90)
+#   - Blackwell (RTX 50 series) - Compute Capability 12.0 (sm_120)
+#
+# Note on CUDA Compatibility:
+#   This container uses CUDA 12.8 toolkit which is REQUIRED for Blackwell GPUs.
+#   RTX 5080/5090 (Blackwell) uses sm_120 compute capability which needs:
+#     - CUDA 12.8+ toolkit
+#     - PyTorch 2.7+ with cu128 wheels
+#   Your host driver must support CUDA >= 12.8 (driver 570.x or newer).
+#
+# IMPORTANT - Blackwell (RTX 50 series) Notes:
+#   - RTX 5080/5090 use compute capability sm_120 (NOT sm_100 as some docs say)
+#   - Standard PyTorch pip packages only support up to sm_90
+#   - Must use PyTorch cu128 wheels for sm_120 support
+#   - NVIDIA changed Docker image naming: use 'cudnn' NOT 'cudnn9'
+#
+# Installed Python Packages:
+#   - PyTorch 2.7.1 (cu128) - Deep learning framework with Blackwell support
+#   - torchvision - Vision utilities (for potential multi-modal extensions)
+#   - datasets - HuggingFace datasets for Shakespeare/TinyStories (REQUIRED)
+#   - tqdm - Progress bars for training matrix
+#   - pyyaml - YAML config file support
+#   - pandas - Data analysis for results
+#   - matplotlib/seaborn - Visualization
+#   - scikit-learn - ML utilities
+#
+# Language Model Specific:
+#   - Supports Shakespeare and TinyStories datasets via HuggingFace
+#   - Character-level tokenization (vocab_size=256)
+#   - Configurable sequence length (seq_len) and embedding dimension (embed_dim)
+#   - Text generation with temperature, top-k, and top-p sampling
+#
+# Changelog:
+#   2025-12-22 - v1.0.1 BUGFIX:
+#                - Added datasets library for HuggingFace Shakespeare/TinyStories
+#                - Added datasets verification step during build
+#   2025-12-22 - v1.0.0 LANGUAGE MODEL RELEASE:
+#                - Converted from BFSNet (vision) to BoeNet (language)
+#                - Updated all script references for language modeling
+#                - Added text generation examples
+#                - Updated environment variables to BOENET_*
+#                - Updated labels and documentation
+#   2025-12-15 - Added tqdm verification step, updated documentation for
+#                detached mode running, updated labels for new features
+#   2025-12-09 - MAJOR UPDATE for Blackwell (RTX 50 series) support:
+#                - Changed CUDA from 12.6.2 to 12.8.0 (12.6.2 doesn't exist)
+#                - Changed cuDNN tag from 'cudnn9' to 'cudnn' (naming convention changed)
+#                - Changed PyTorch from 2.5.1 to 2.7.1 (cu128 required for sm_120)
+#                - Changed PyTorch index from cu124 to cu128 (required for Blackwell)
+#                - Fixed TORCH_CUDA_ARCH_LIST: sm_120 NOT sm_100 for Blackwell
+#   2025-09-18 - Fixed permission issue with directory creation
+#   2025-09-18 - Updated to CUDA 12.6 and PyTorch 2.5+ for RTX 50 series
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Build Arguments
+# ----------------------------------------------------------------------------
+# CUDA 12.8.0 - REQUIRED for Blackwell (RTX 50 series) sm_120 support
+# Note: nvidia/cuda:12.6.2-cudnn9-runtime-ubuntu22.04 does NOT exist on Docker Hub
+# Available images use format: nvidia/cuda:VERSION-cudnn-runtime-ubuntuVERSION
+# (no version number after 'cudnn' - naming convention changed)
+ARG CUDA_VERSION=12.8.0
+ARG UBUNTU_VERSION=22.04
+ARG PYTHON_VERSION=3.11
+# PyTorch 2.7.1 with cu128 includes sm_120 (Blackwell) support
+ARG PYTORCH_VERSION=2.7.1
+
+# ----------------------------------------------------------------------------
+# Base Image - NVIDIA CUDA Runtime
+# ----------------------------------------------------------------------------
+# Using CUDA 12.8 runtime with cuDNN for RTX 50 series (Blackwell) support
+# CRITICAL: Tag format is 'cudnn' NOT 'cudnn9' - NVIDIA changed naming convention
+# Note: CUDA toolkit version must be <= host driver's CUDA version
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu${UBUNTU_VERSION} AS base
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Python and system encoding
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=UTF-8 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# ----------------------------------------------------------------------------
+# System Dependencies
+# ----------------------------------------------------------------------------
+FROM base AS system-deps
+
+# Install Python and system packages
+ARG PYTHON_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Python - using 3.11 for best compatibility with PyTorch 2.7
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-dev \
+    python${PYTHON_VERSION}-venv \
+    python3-pip \
+    # Build essentials
+    build-essential \
+    gcc \
+    g++ \
+    # Git
+    git \
+    # Image processing (for potential multi-modal extensions)
+    libjpeg-dev \
+    libpng-dev \
+    # Scientific computing
+    libopenblas-dev \
+    liblapack-dev \
+    # Utilities
+    curl \
+    wget \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Set Python as default
+ARG PYTHON_VERSION
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1
+
+# ----------------------------------------------------------------------------
+# Python Dependencies
+# ----------------------------------------------------------------------------
+FROM system-deps AS python-deps
+
+# Upgrade pip
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Install PyTorch with CUDA 12.8 support (cu128)
+# CRITICAL: Must use cu128 index for Blackwell (sm_120) support
+# Standard cu124 wheels do NOT include sm_120 kernels
+# PyTorch 2.7+ with cu128 includes compute capability 12.0 (Blackwell/RTX 50 series)
+ARG PYTORCH_VERSION
+RUN pip install --no-cache-dir \
+    torch==${PYTORCH_VERSION} \
+    torchvision \
+    torchaudio \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# Verify PyTorch installation and CUDA support
+# This will fail the build early if something is wrong
+RUN python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}')"
+
+# Copy and install project requirements
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install additional packages with updated versions
+# CRITICAL: tqdm is REQUIRED for progress bars in boenet_training_matrix.py
+# CRITICAL: datasets is REQUIRED for HuggingFace Shakespeare/TinyStories
+RUN pip install --no-cache-dir \
+    pyyaml>=6.0.0 \
+    tqdm>=4.66.0 \
+    pandas>=2.0.0 \
+    matplotlib>=3.7.0 \
+    seaborn>=0.12.0 \
+    networkx>=3.0 \
+    scipy>=1.11.0 \
+    scikit-learn>=1.3.0 \
+    datasets>=2.14.0
+
+# Verify tqdm installation (required for progress bars in boenet_training_matrix.py)
+RUN python -c "import tqdm; print(f'tqdm installed successfully, version: {tqdm.__version__}')"
+
+# Verify datasets installation (required for Shakespeare/TinyStories)
+RUN python -c "import datasets; print(f'datasets installed successfully, version: {datasets.__version__}')"
+
+# Optional: Install NVIDIA tools for monitoring
+RUN pip install --no-cache-dir \
+    nvidia-ml-py3 \
+    gpustat
+
+# Optional: Install pytest-env for environment variable support in tests
+RUN pip install --no-cache-dir pytest-env
+
+# ----------------------------------------------------------------------------
+# Application
+# ----------------------------------------------------------------------------
+FROM python-deps AS app
+
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash boenet
+
+# Set working directory (still running as root at this point)
+WORKDIR /app
+
+# Create necessary directories AS ROOT (before switching to boenet user)
+# This ensures we have permission to create all directories
+RUN mkdir -p /app/data /app/runs /app/figures /app/configs /app/checkpoints
+
+# Change ownership of the entire /app directory to boenet user
+# This must happen BEFORE the COPY command and BEFORE switching users
+RUN chown -R boenet:boenet /app
+
+# Now switch to non-root user
+USER boenet
+
+# Copy application code (as boenet user, directories already exist with correct ownership)
+COPY --chown=boenet:boenet . .
+
+# ----------------------------------------------------------------------------
+# Environment Configuration
+# ----------------------------------------------------------------------------
+# CUDA settings
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# BoeNet settings (language model)
+ENV BOENET_DEVICE=auto \
+    BOENET_DATA_ROOT=/app/data \
+    BOENET_RUNS_ROOT=/app/runs \
+    BOENET_CONFIG=/app/configs/experiment-config.yaml \
+    BOENET_LOG_LEVEL=INFO \
+    BOENET_DATASET=shakespeare \
+    BOENET_VOCAB_SIZE=256 \
+    BOENET_SEQ_LEN=128 \
+    BOENET_EMBED_DIM=64
+
+# HuggingFace datasets cache directory
+# This ensures datasets are cached in a persistent location when volume mounted
+ENV HF_DATASETS_CACHE=/app/data/huggingface_cache \
+    HF_HOME=/app/data/huggingface_home
+
+# PyTorch CUDA settings
+# CRITICAL: Blackwell (RTX 50 series) uses sm_120, NOT sm_100
+# This was a common misconception - the correct compute capability is 12.0
+# 
+# Supported architectures:
+#   - 6.0, 6.1: Pascal (GTX 10 series)
+#   - 7.0: Volta (Titan V)
+#   - 7.5: Turing (RTX 20 series)
+#   - 8.0: Ampere (A100, RTX 30 series)
+#   - 8.6: Ampere (RTX 30 series consumer)
+#   - 8.9: Ada Lovelace (RTX 40 series)
+#   - 9.0: Hopper (H100)
+#   - 12.0: Blackwell (RTX 50 series) - sm_120
+ENV TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6 8.9 9.0 12.0" \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# Performance settings
+ENV OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4
+
+# ----------------------------------------------------------------------------
+# Health Check
+# ----------------------------------------------------------------------------
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; from boenet.model import BoeNet; import datasets; print('OK')" || exit 1
+
+# ----------------------------------------------------------------------------
+# Default Command
+# ----------------------------------------------------------------------------
+CMD ["python", "train_boenet.py", "--help"]
+
+# ----------------------------------------------------------------------------
+# Labels
+# ----------------------------------------------------------------------------
+LABEL maintainer="BoeNet Project" \
+    version="1.0.1" \
+    description="BoeNet CUDA Training and Inference Container for Language Models with Blackwell Support" \
+    model.type="language" \
+    model.architecture="BFS+REINFORCE" \
+    model.task="next-token-prediction" \
+    cuda.version="12.8" \
+    cudnn.version="bundled" \
+    pytorch.version="2.7.1" \
+    pytorch.cuda.index="cu128" \
+    blackwell.compute.capability="sm_120" \
+    supported.architectures="Pascal, Volta, Turing, Ampere, Ada Lovelace, Hopper, Blackwell" \
+    supported.datasets="shakespeare, tinystories, textfile" \
+    features="tqdm progress bars, YAML config, text generation, perplexity metrics, policy analysis, HuggingFace datasets" \
+    scripts.train="train_boenet.py" \
+    scripts.infer="infer_boenet.py" \
+    scripts.matrix="boenet_training_matrix.py" \
+    scripts.test="test_true_sparsity_boenet.py" \
+    org.opencontainers.image.source="https://github.com/boenet/boenet" \
+    org.opencontainers.image.title="BoeNet CUDA" \
+    org.opencontainers.image.description="GPU-accelerated container for BoeNet language model training and inference with RTX 50 series (Blackwell sm_120) support"
+
+# ============================================================================
+# Usage Examples
+# ============================================================================
+#
+# 1. TRAINING ON SHAKESPEARE (Quick Start):
+#    docker run --rm --gpus all \
+#        -v $(pwd)/data:/app/data \
+#        -v $(pwd)/runs:/app/runs \
+#        boenet:cuda python train_boenet.py \
+#            --dataset shakespeare \
+#            --epochs 10 \
+#            --seq_len 128 \
+#            --embed_dim 64 \
+#            --hidden_dim 128 \
+#            --max_depth 2 \
+#            --max_children 3 \
+#            --lambda_efficiency 0.05 \
+#            --greedy_threshold 0.42
+#
+# 2. TRAINING ON TINYSTORIES (Larger Dataset):
+#    docker run --rm --gpus all \
+#        -v $(pwd)/data:/app/data \
+#        -v $(pwd)/runs:/app/runs \
+#        boenet:cuda python train_boenet.py \
+#            --dataset tinystories \
+#            --epochs 20 \
+#            --seq_len 256 \
+#            --embed_dim 128 \
+#            --hidden_dim 256 \
+#            --batch_size 32
+#
+# 3. TEXT GENERATION:
+#    docker run --rm -it --gpus all \
+#        -v $(pwd)/runs:/app/runs \
+#        boenet:cuda python infer_boenet.py \
+#            --ckpt runs/checkpoint.pt \
+#            --generate \
+#            --prompt "To be or not to be" \
+#            --max_tokens 200 \
+#            --temperature 0.8 \
+#            --top_k 40
+#
+# 4. POLICY ANALYSIS (Debug):
+#    docker run --rm --gpus all \
+#        -v $(pwd)/runs:/app/runs \
+#        boenet:cuda python infer_boenet.py \
+#            --ckpt runs/checkpoint.pt \
+#            --debug_policy \
+#            --samples 1000
+#
+# 5. FULL SWEEP (Background):
+#    docker run -d --gpus all \
+#        --name boenet_sweep \
+#        -v $(pwd)/data:/app/data \
+#        -v $(pwd)/runs:/app/runs \
+#        -v $(pwd)/configs:/app/configs \
+#        boenet:cuda python boenet_training_matrix.py \
+#            --config configs/experiment-config.yaml
+#
+#    # Monitor:
+#    docker logs -f boenet_sweep
+#
+# 6. QUICK TEST (CI/CD):
+#    docker run --rm --gpus all \
+#        -v $(pwd)/data:/app/data \
+#        -v $(pwd)/runs:/app/runs \
+#        -v $(pwd)/configs:/app/configs \
+#        boenet:cuda python boenet_training_matrix.py \
+#            --config configs/test-config.yaml
+#
+# 7. SPARSITY TESTS:
+#    docker run --rm --gpus all \
+#        boenet:cuda python test_true_sparsity_boenet.py
+#
+# 8. INTERACTIVE SHELL:
+#    docker run --rm -it --gpus all \
+#        -v $(pwd):/app \
+#        boenet:cuda bash
+#
+# ============================================================================
+
+# ============================================================================
+# Environment Variables Reference
+# ============================================================================
+#
+# BOENET_DEVICE:      Device selection (auto, cuda, cpu)
+# BOENET_DATA_ROOT:   Data directory path
+# BOENET_RUNS_ROOT:   Output/runs directory path
+# BOENET_CONFIG:      Default config file path
+# BOENET_LOG_LEVEL:   Logging level (DEBUG, INFO, WARNING, ERROR)
+# BOENET_DATASET:     Default dataset (shakespeare, tinystories)
+# BOENET_VOCAB_SIZE:  Vocabulary size (256 for char-level)
+# BOENET_SEQ_LEN:     Default sequence length
+# BOENET_EMBED_DIM:   Default embedding dimension
+# HF_DATASETS_CACHE:  HuggingFace datasets cache directory
+# HF_HOME:            HuggingFace home directory
+#
+# Override any of these at runtime:
+#   docker run --rm --gpus all \
+#       -e BOENET_DATASET=tinystories \
+#       -e BOENET_SEQ_LEN=256 \
+#       boenet:cuda python train_boenet.py
+#
+# ============================================================================
+
+# ============================================================================
+# Volume Mounts Reference
+# ============================================================================
+#
+# /app/data:       Dataset storage (Shakespeare, TinyStories, HuggingFace cache)
+# /app/runs:       Training outputs (checkpoints, logs, CSVs)
+# /app/configs:    YAML configuration files
+# /app/figures:    Generated plots and visualizations
+# /app/checkpoints: Model checkpoints (alternative to runs/)
+#
+# Recommended mount command:
+#   docker run --rm --gpus all \
+#       -v $(pwd)/data:/app/data \
+#       -v $(pwd)/runs:/app/runs \
+#       -v $(pwd)/configs:/app/configs \
+#       boenet:cuda <command>
+#
+# NOTE: Mounting /app/data ensures HuggingFace datasets are cached persistently
+#       across container runs, avoiding re-downloads.
+#
+# ============================================================================
+
+# ============================================================================
+# Troubleshooting
+# ============================================================================
+#
+# 1. "CUDA not available" error:
+#    - Ensure NVIDIA Container Toolkit is installed
+#    - Run: nvidia-smi (should show GPU info)
+#    - Use --gpus all flag
+#
+# 2. "Out of memory" error:
+#    - Reduce batch_size (e.g., 32 or 16)
+#    - Reduce seq_len (e.g., 64)
+#    - Reduce hidden_dim (e.g., 64)
+#
+# 3. "Dataset not found" or "datasets library not available" error:
+#    - The datasets library should be pre-installed in this container
+#    - If running locally: pip install datasets
+#    - Ensure data volume is mounted: -v $(pwd)/data:/app/data
+#    - Dataset downloads automatically on first run
+#
+# 4. "Permission denied" error:
+#    - Check volume ownership
+#    - Run: docker run --rm -v $(pwd)/data:/app/data boenet:cuda ls -la /app/data
+#
+# 5. Slow training:
+#    - Verify GPU is being used: watch nvidia-smi
+#    - Check batch_size (larger = faster but more memory)
+#    - Use TensorFloat-32: export NVIDIA_TF32_OVERRIDE=1
+#
+# 6. Text generation produces garbage:
+#    - Model may not be trained enough (increase epochs)
+#    - Try lower temperature (0.5-0.8)
+#    - Use top_k or top_p sampling
+#
+# 7. HuggingFace download issues:
+#    - Check internet connectivity
+#    - Try setting HF_DATASETS_OFFLINE=1 if datasets are already cached
+#    - Mount data volume to persist cache: -v $(pwd)/data:/app/data
+#
+# ============================================================================

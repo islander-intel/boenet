@@ -1,0 +1,428 @@
+# ============================================================================
+# BoeNet v1.0.0 Test Configuration (Minimal Sweep for CI/CD)
+# ============================================================================
+# 
+# PURPOSE: Minimal configuration for continuous integration and quick testing
+#          Verifies v1.0.0 training/inference pipeline works correctly
+#
+# Converted from BFSNet v2.0.0 (Vision) to BoeNet v1.0.0 (Language)
+# -----------------------------------------------------------------
+# Key Changes:
+#   - ADDED: vocab_size, seq_len, embed_dim, dataset parameters
+#   - CHANGED: Accuracy metrics → Perplexity metrics
+#   - CHANGED: Script paths → train_boenet.py, infer_boenet.py
+#   - CHANGED: Expected results for language modeling
+#   - UNCHANGED: All policy parameters structure
+#
+# v1.0.0 Changes from BFSNet v1.4.0:
+# ----------------------------------
+# REMOVED:
+#   - temp_schedules, fixed_temps, cosine_anneal (no Gumbel-Softmax)
+#   - warmup_epochs_list (no exec mode switching)
+#   - infer_force_exec (no sparse/soft_full modes)
+#
+# ADDED:
+#   - lambda_efficiency_list (REINFORCE reward penalty)
+#   - greedy_threshold_list (inference decision threshold)
+#   - num_rollouts_list (stochastic exploration)
+#   - beta_entropy_list, beta_policy_list (policy gradient params)
+#   - debug_policy (policy analysis flag)
+#   - vocab_size, seq_len, embed_dim, dataset (language model params)
+#
+# SCOPE: Absolute minimum for testing
+# ------------------------------------
+# - 1 dense baseline (K=0)
+# - 1 BFS config (K=3) with 2 threshold values
+# - Total runs: (K=0 × 1) + (K=3 × 2 thresholds) = 3 runs
+# - Estimated time: ~10-15 minutes (language models slower than vision)
+#
+# Usage:
+#   python boenet_training_matrix.py --config configs/test-config.yaml
+#
+# Expected Behavior:
+#   - Dense model trains and achieves PPL ~30-50 on Shakespeare
+#   - BFS model with threshold=0.50 → root-only (~1 node/position)
+#   - BFS model with threshold=0.42 → partial tree (~5-8 nodes/position)
+#   - No crashes, clean logs, valid CSV output
+#
+# ============================================================================
+
+sweep:
+  # ==========================================================================
+  # LANGUAGE MODEL PARAMETERS (NEW FOR BOENET) - MINIMAL
+  # ==========================================================================
+  
+  # Vocabulary size: FIXED at 256 (character-level)
+  # Character-level tokenization uses all 256 byte values
+  vocab_size: 256
+  
+  # Sequence length: MINIMAL for fast testing
+  # 64 tokens is enough to verify training works
+  seq_len_list: [64]
+  
+  # Embedding dimension: MINIMAL for fast testing
+  # 32 is compact but sufficient for testing
+  embed_dim_list: [32]
+  
+  # Dataset: Shakespeare (small, fast to download)
+  # ~1MB of text, trains quickly
+  dataset: shakespeare
+  
+  # ==========================================================================
+  # v1.0.0 POLICY PARAMETERS - MINIMAL FOR TESTING
+  # ==========================================================================
+  
+  # Lambda efficiency: FIXED at standard value
+  # Testing only λ=0.05 (known to work well from BFSNet)
+  lambda_efficiency_list: [0.05]
+  
+  # Greedy threshold: Test DEFAULT vs RECOMMENDED
+  # 0.50: Default (expect root-only for K>0)
+  # 0.42: Recommended (expect partial tree for K>0)
+  greedy_threshold_list: [0.42, 0.50]
+  
+  # Number of rollouts: FIXED at standard
+  num_rollouts_list: [3]
+  
+  # Entropy bonus: FIXED at standard
+  beta_entropy_list: [0.01]
+  
+  # Policy loss weight: FIXED at standard
+  beta_policy_list: [0.5]
+  
+  # ==========================================================================
+  # ARCHITECTURE PARAMETERS - MINIMAL
+  # ==========================================================================
+  
+  # K values: Dense baseline + single BFS
+  # K=0: Dense MLP (no branching)
+  # K=3: BFS with 3 children per node
+  k_values: [0, 3]
+  
+  # Max depth: FIXED at standard
+  max_depths: [2]
+  
+  # Hidden dimensions: FIXED at minimal
+  # 64 is sufficient for testing on small dataset
+  hidden_dims: [64]
+  
+  # Pooling: FIXED at simplest
+  poolings: [mean]
+  
+  # ==========================================================================
+  # OPTIMIZATION - MINIMAL
+  # ==========================================================================
+  
+  # Learning rate: FIXED at standard
+  lrs: [0.001]
+  
+  # Batch size: FIXED at standard
+  batch_sizes: [64]
+  
+  # Weight decay: FIXED at none
+  weight_decays: [0.0]
+  
+  # Epochs: MINIMAL for fast testing
+  # 5 epochs is enough to verify training works
+  # Won't converge fully but will show training is working
+  epochs_list: [5]
+
+# ============================================================================
+# TRAINING SETTINGS
+# ============================================================================
+training:
+  # Epochs per run
+  epochs: 5
+  
+  # Repeats: Single run (no statistics needed for testing)
+  repeats: 1
+  
+  # Base random seed
+  seed0: 42
+  
+  # Dataset
+  dataset: shakespeare
+
+# ============================================================================
+# INFERENCE SETTINGS
+# ============================================================================
+inference:
+  # Minimal samples for quick inference
+  # 100 samples is enough to verify inference works
+  infer_samples: 100
+  
+  # Force CPU for consistency across CI/CD environments
+  cpu_only: true
+  
+  # Enable policy analysis (verify debug_policy flag works)
+  debug_policy: true
+
+# ============================================================================
+# PATHS
+# ============================================================================
+paths:
+  # Output directory
+  save_root: runs
+  
+  # Dataset directory
+  data_root: ./data
+  
+  # Training script (BoeNet v1.0.0)
+  train_script: train_boenet.py
+  
+  # Inference script (BoeNet v1.0.0)
+  infer_script: infer_boenet.py
+
+# ============================================================================
+# EXPECTED OUTPUTS (CI/CD Validation)
+# ============================================================================
+#
+# After running this config, verify:
+#
+# 1. CSV OUTPUT COLUMNS (v1.0.0 Language Model):
+#    ✓ greedy_threshold column present
+#    ✓ lambda_efficiency column present
+#    ✓ num_rollouts column present
+#    ✓ infer_mean_grow_prob column present (if debug_policy=true)
+#    ✓ vocab_size column present (NEW)
+#    ✓ seq_len column present (NEW)
+#    ✓ embed_dim column present (NEW)
+#    ✓ infer_val_ppl column present (replaces infer_acc_percent)
+#    ✗ temp_schedule column ABSENT (v1.4.0 removed)
+#    ✗ warmup_epochs column ABSENT (v1.4.0 removed)
+#    ✗ infer_acc_percent column ABSENT (vision metric)
+#
+# 2. TRAINING LOGS:
+#    ✓ Shows "policy: num_rollouts=3, λ_eff=0.05, β_ent=0.01, β_policy=0.5"
+#    ✓ Shows "greedy_threshold=0.42 (inference)" or "greedy_threshold=0.50"
+#    ✓ Shows "Train PPL: XX.XX | Val PPL: XX.XX"
+#    ✓ Shows "Avg Nodes/Position: X.XX"
+#    ✗ No temperature mentions (v1.4.0 removed)
+#    ✗ No accuracy mentions (vision metric)
+#
+# 3. INFERENCE LOGS:
+#    ✓ Shows "GROWTH POLICY ANALYSIS" section (if debug_policy=true)
+#    ✓ Shows mean_grow_prob ≈ 0.44-0.45
+#    ✓ Shows threshold mismatch warning for threshold=0.50
+#    ✓ Shows "Val PPL: XX.XX"
+#    ✓ Shows "Random baseline PPL: 256.00" (vocab_size)
+#
+# 4. EXPECTED RESULTS:
+#    Dense (K=0):
+#      - val_ppl_best: ~30-60 (5 epochs, not converged)
+#      - infer_avg_nodes: 1.0 (always, no tree)
+#    
+#    BFS (K=3, threshold=0.50):
+#      - val_ppl_best: ~25-50 (5 epochs, not converged)
+#      - infer_avg_nodes: ~1.0 (root-only due to high threshold)
+#      - infer_mean_grow_prob: ~0.44 (learned policy)
+#    
+#    BFS (K=3, threshold=0.42):
+#      - val_ppl_best: ~25-50 (5 epochs, not converged)
+#      - infer_avg_nodes: ~5-8 (partial tree)
+#      - infer_mean_grow_prob: ~0.44 (learned policy)
+#
+# 5. TEXT GENERATION (optional verification):
+#    Run: python infer_boenet.py --ckpt runs/.../checkpoint.pt \
+#           --generate --prompt "The " --max_tokens 100
+#    ✓ Should produce readable (if not perfect) text
+#    ✓ No crashes or errors
+#
+# ============================================================================
+
+# ============================================================================
+# CI/CD INTEGRATION EXAMPLES
+# ============================================================================
+#
+# GitHub Actions:
+# ```yaml
+# name: BoeNet Test
+# on: [push, pull_request]
+# 
+# jobs:
+#   test:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v3
+#       
+#       - name: Set up Python
+#         uses: actions/setup-python@v4
+#         with:
+#           python-version: '3.10'
+#       
+#       - name: Install dependencies
+#         run: |
+#           pip install torch numpy tqdm pyyaml
+#       
+#       - name: Run minimal BoeNet test
+#         run: |
+#           python boenet_training_matrix.py \
+#             --config configs/test-config.yaml
+#       
+#       - name: Verify CSV format
+#         run: |
+#           python -c "
+#           import pandas as pd
+#           import glob
+#           csv = sorted(glob.glob('runs/*/matrix_results.csv'))[-1]
+#           df = pd.read_csv(csv)
+#           
+#           # v1.0.0 columns present
+#           assert 'greedy_threshold' in df.columns, 'Missing greedy_threshold'
+#           assert 'lambda_efficiency' in df.columns, 'Missing lambda_efficiency'
+#           assert 'vocab_size' in df.columns, 'Missing vocab_size'
+#           assert 'seq_len' in df.columns, 'Missing seq_len'
+#           assert 'embed_dim' in df.columns, 'Missing embed_dim'
+#           assert 'infer_val_ppl' in df.columns, 'Missing infer_val_ppl'
+#           
+#           # v1.4.0 columns absent
+#           assert 'temp_schedule' not in df.columns, 'temp_schedule should be removed'
+#           assert 'infer_acc_percent' not in df.columns, 'Vision metric should be removed'
+#           
+#           # Basic sanity checks
+#           assert len(df) == 3, f'Expected 3 runs, got {len(df)}'
+#           assert df['vocab_size'].iloc[0] == 256, 'vocab_size should be 256'
+#           assert df['seq_len'].iloc[0] == 64, 'seq_len should be 64'
+#           
+#           # Perplexity sanity (should be < random baseline)
+#           random_ppl = 256  # vocab_size
+#           for ppl in df['infer_val_ppl'].dropna():
+#               assert ppl < random_ppl, f'PPL {ppl} >= random baseline {random_ppl}'
+#           
+#           print('✓ CSV format is v1.0.0 (Language Model)')
+#           print(f'✓ All {len(df)} runs completed successfully')
+#           "
+#       
+#       - name: Test text generation
+#         run: |
+#           # Find a checkpoint
+#           CKPT=$(find runs -name "*.pt" | head -1)
+#           if [ -n "$CKPT" ]; then
+#             python infer_boenet.py --ckpt "$CKPT" \
+#               --generate --prompt "The " --max_tokens 50 \
+#               --cpu
+#             echo "✓ Text generation works"
+#           fi
+#       
+#       - name: Upload results
+#         uses: actions/upload-artifact@v3
+#         with:
+#           name: boenet-test-results
+#           path: runs/
+#           retention-days: 7
+# ```
+#
+# GitLab CI:
+# ```yaml
+# stages:
+#   - test
+#
+# boenet-test:
+#   stage: test
+#   image: python:3.10
+#   script:
+#     - pip install torch numpy tqdm pyyaml
+#     - python boenet_training_matrix.py --config configs/test-config.yaml
+#     - |
+#       python -c "
+#       import pandas as pd
+#       import glob
+#       csv = sorted(glob.glob('runs/*/matrix_results.csv'))[-1]
+#       df = pd.read_csv(csv)
+#       assert 'vocab_size' in df.columns
+#       assert 'infer_val_ppl' in df.columns
+#       print(f'✓ {len(df)} runs completed')
+#       "
+#   artifacts:
+#     paths:
+#       - runs/
+#     expire_in: 1 day
+# ```
+#
+# Local quick test:
+# ```bash
+# # Quick test (should complete in ~10-15 minutes)
+# python boenet_training_matrix.py --config configs/test-config.yaml
+#
+# # Verify output
+# ls runs/*/matrix_results.csv
+# head -5 runs/*/matrix_results.csv
+#
+# # Test generation with best model
+# BEST=$(python -c "
+# import pandas as pd
+# import glob
+# csv = sorted(glob.glob('runs/*/matrix_results.csv'))[-1]
+# df = pd.read_csv(csv)
+# best = df.loc[df['infer_val_ppl'].idxmin()]
+# print(best['checkpoint_path'])
+# ")
+# python infer_boenet.py --ckpt "$BEST" --generate --prompt "Once upon a time" --max_tokens 100
+# ```
+#
+# ============================================================================
+
+# ============================================================================
+# TROUBLESHOOTING
+# ============================================================================
+#
+# If tests fail, check:
+#
+# 1. IMPORT ERRORS:
+#    - Ensure boenet package is installed or in PYTHONPATH
+#    - pip install -e . (from project root)
+#
+# 2. DATA ERRORS:
+#    - Shakespeare data downloads automatically on first run
+#    - Check internet connectivity
+#    - Check data_root directory permissions
+#
+# 3. CUDA ERRORS:
+#    - cpu_only=true should force CPU execution
+#    - If CUDA errors persist, set CUDA_VISIBLE_DEVICES=""
+#
+# 4. MEMORY ERRORS:
+#    - Reduce batch_size to 32
+#    - Reduce seq_len to 32
+#    - Use smaller hidden_dim (32)
+#
+# 5. PERPLEXITY TOO HIGH:
+#    - 5 epochs is minimal, won't converge fully
+#    - PPL ~30-60 is expected for 5 epochs on Shakespeare
+#    - PPL should be < 256 (random baseline)
+#
+# 6. ZERO CHILDREN IN INFERENCE:
+#    - This is EXPECTED for threshold=0.50
+#    - threshold=0.42 should show children
+#    - Check debug_policy output for mean_grow_prob
+#
+# ============================================================================
+
+# ============================================================================
+# COMPARISON TO BFSNET TEST CONFIG
+# ============================================================================
+#
+# Key differences from BFSNet test-config.yaml:
+#
+# ADDED PARAMETERS:
+#   vocab_size: 256 (character-level vocabulary)
+#   seq_len_list: [64] (sequence length)
+#   embed_dim_list: [32] (token embedding dimension)
+#   dataset: shakespeare (text corpus)
+#
+# CHANGED METRICS:
+#   BFSNet: val_acc_best, infer_acc_percent (accuracy %)
+#   BoeNet: val_ppl_best, infer_val_ppl (perplexity)
+#
+# CHANGED SCRIPTS:
+#   BFSNet: train_fmnist_bfs.py, infer_fmnist_bfs.py
+#   BoeNet: train_boenet.py, infer_boenet.py
+#
+# SAME STRUCTURE:
+#   - Policy parameters (λ, threshold, rollouts, entropy, policy weight)
+#   - Architecture parameters (K, depth, hidden_dim, pooling)
+#   - Optimization parameters (lr, batch_size, weight_decay, epochs)
+#   - Training settings (repeats, seed)
+#   - Inference settings (samples, cpu_only, debug_policy)
+#
+# ============================================================================

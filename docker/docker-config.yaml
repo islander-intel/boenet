@@ -1,0 +1,264 @@
+# ============================================================================
+# BFSNet Docker Configuration
+# ============================================================================
+# Environment and device settings for Docker containers.
+#
+# This file is read by container entrypoints and can be mounted into
+# containers to override default settings.
+#
+# Usage:
+#   docker run -v $(pwd)/docker/docker-config.yaml:/app/docker-config.yaml \
+#       bfsnet:cpu python train_fmnist_bfs.py
+# ============================================================================
+
+# ============================================================================
+# Device Configuration
+# ============================================================================
+device:
+  # Device selection mode
+  # Options: auto, cpu, cuda, cuda:0, cuda:1, mps
+  # - auto: Automatically select best available device
+  # - cpu: Force CPU (useful for debugging or fair benchmarks)
+  # - cuda: Use first available CUDA GPU
+  # - cuda:N: Use specific GPU index N
+  # - mps: Use Apple Metal Performance Shaders (M1/M2 Macs)
+  type: auto
+  
+  # GPU-specific settings
+  gpu:
+    # Memory fraction to allocate (0.0-1.0)
+    # Set lower if running multiple processes
+    memory_fraction: 0.9
+    
+    # Allow memory growth vs pre-allocation
+    # true: Allocate as needed (slower startup, flexible)
+    # false: Pre-allocate full memory (faster, may OOM)
+    allow_growth: true
+    
+    # Specific GPU indices to use (comma-separated)
+    # Empty means use all available
+    visible_devices: ""
+    
+    # Enable TF32 for faster matmul on Ampere+ GPUs
+    # Slightly reduced precision but ~2x faster
+    enable_tf32: true
+    
+    # Enable cuDNN benchmark mode
+    # Finds optimal algorithms (slower first epoch, faster thereafter)
+    cudnn_benchmark: true
+    
+    # Make cuDNN deterministic (reproducibility vs speed)
+    cudnn_deterministic: false
+  
+  # CPU-specific settings
+  cpu:
+    # Number of threads for PyTorch operations
+    num_threads: 4
+    
+    # Number of threads for inter-op parallelism
+    num_interop_threads: 2
+    
+    # Enable Intel MKL optimizations (if available)
+    use_mkl: true
+    
+    # Number of OpenMP threads
+    omp_num_threads: 4
+
+# ============================================================================
+# Data Configuration
+# ============================================================================
+data:
+  # Root directory for datasets
+  root: /app/data
+  
+  # Number of DataLoader workers
+  # 0: Load in main process (slower but easier to debug)
+  # N: Use N worker processes (faster but uses more memory)
+  num_workers: 4
+  
+  # Pin memory for faster GPU transfer
+  pin_memory: true
+  
+  # Prefetch factor (batches to prefetch per worker)
+  prefetch_factor: 2
+  
+  # Persistent workers (keep workers alive between epochs)
+  persistent_workers: true
+  
+  # Dataset-specific settings
+  fashionmnist:
+    # Download if not present
+    download: true
+    
+    # Data augmentation
+    augmentation:
+      enabled: false
+      random_horizontal_flip: false
+      random_rotation: 0
+      normalize: true
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output:
+  # Root directory for training outputs
+  root: /app/runs
+  
+  # Checkpoint settings
+  checkpoint:
+    # Save checkpoints
+    enabled: true
+    
+    # Save best model (by validation accuracy)
+    save_best: true
+    
+    # Save every N epochs (0 = only save best/final)
+    save_every: 0
+    
+    # Keep last N checkpoints (0 = keep all)
+    keep_last: 3
+  
+  # Logging settings
+  logging:
+    # Log level: DEBUG, INFO, WARNING, ERROR
+    level: INFO
+    
+    # Log to file
+    to_file: true
+    
+    # Log filename pattern
+    filename: "train_{timestamp}.log"
+    
+    # Log to console
+    to_console: true
+    
+    # Colorized console output
+    colorize: true
+  
+  # TensorBoard settings
+  tensorboard:
+    # Enable TensorBoard logging
+    enabled: false
+    
+    # Log directory (relative to output.root)
+    log_dir: tensorboard
+    
+    # Log histograms (weights, gradients)
+    log_histograms: false
+    
+    # Log images (predictions, samples)
+    log_images: false
+  
+  # Weights & Biases settings
+  wandb:
+    # Enable W&B logging
+    enabled: false
+    
+    # Project name
+    project: bfsnet
+    
+    # Entity (username or team)
+    entity: null
+    
+    # Run name (null = auto-generated)
+    name: null
+    
+    # Tags
+    tags: []
+
+# ============================================================================
+# Training Configuration
+# ============================================================================
+training:
+  # Random seed for reproducibility
+  seed: 42
+  
+  # Deterministic mode (slower but reproducible)
+  deterministic: false
+  
+  # Mixed precision training
+  mixed_precision:
+    # Enable AMP (Automatic Mixed Precision)
+    enabled: false
+    
+    # Data type: float16, bfloat16
+    dtype: float16
+    
+    # Gradient scaling (for float16)
+    grad_scaler: true
+  
+  # Gradient accumulation steps
+  # Effective batch size = batch_size * accumulation_steps
+  gradient_accumulation_steps: 1
+  
+  # Gradient clipping
+  gradient_clip:
+    # Enable gradient clipping
+    enabled: true
+    
+    # Max gradient norm
+    max_norm: 1.0
+    
+    # Norm type (2 = L2 norm)
+    norm_type: 2
+
+# ============================================================================
+# Inference Configuration
+# ============================================================================
+inference:
+  # Batch size for inference
+  batch_size: 128
+  
+  # Number of workers
+  num_workers: 4
+  
+  # Use mixed precision
+  mixed_precision: false
+  
+  # Execution mode
+  # - sparse: Production mode (hard masking)
+  # - soft_full: Debug mode (soft masking)
+  exec_mode: sparse
+  
+  # Temperature for Gumbel-Softmax (lower = more discrete)
+  temperature: 1.0
+
+# ============================================================================
+# Resource Limits
+# ============================================================================
+resources:
+  # Maximum memory usage (GB)
+  # 0 = no limit
+  max_memory_gb: 0
+  
+  # Maximum CPU cores
+  # 0 = no limit
+  max_cpus: 0
+  
+  # Timeout for training (seconds)
+  # 0 = no timeout
+  timeout_seconds: 0
+
+# ============================================================================
+# Debug Configuration
+# ============================================================================
+debug:
+  # Enable debug mode
+  enabled: false
+  
+  # Print model summary
+  print_model: true
+  
+  # Print shapes during forward pass
+  print_shapes: false
+  
+  # Enable anomaly detection (slow but catches NaN/Inf)
+  detect_anomaly: false
+  
+  # Profile training
+  profile:
+    enabled: false
+    wait_steps: 1
+    warmup_steps: 1
+    active_steps: 3
+    repeat: 1
