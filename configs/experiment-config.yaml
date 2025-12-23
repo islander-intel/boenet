@@ -1,12 +1,12 @@
 # ============================================================================
-# BoeNet v1.0.0 Threshold Sweep Configuration (Language Model)
+# BoeNet v2.0.0 Threshold Sweep Configuration (Language Model)
 # ============================================================================
 # 
 # PURPOSE: Find optimal (lambda_efficiency, greedy_threshold) pairs
-#          for language modeling on Shakespeare/TinyStories
-#          Critical for v1.0.0 due to training/inference mismatch issue
+#          for language modeling on WikiText-2/TinyStories
+#          Critical for v2.0.0 due to training/inference mismatch issue
 #
-# Converted from BFSNet v2.0.0 (Vision) to BoeNet v1.0.0 (Language)
+# Converted from BFSNet v2.0.0 (Vision) to BoeNet v2.0.0 (Language)
 # -----------------------------------------------------------------
 # Key Changes:
 #   - ADDED: vocab_size, seq_len, embed_dim, dataset parameters
@@ -15,7 +15,19 @@
 #   - CHANGED: Script paths → train_boenet.py, infer_boenet.py
 #   - CHANGED: Input dimensions (784 → embed_dim)
 #   - CHANGED: Output dimensions (10 → vocab_size)
+#   - CHANGED: Default dataset shakespeare → wikitext2 (v2.0.0)
 #   - UNCHANGED: All policy parameters (λ, threshold, rollouts, etc.)
+#
+# v2.0.0 DATASET CHANGE:
+# ----------------------
+# Default dataset changed from shakespeare to wikitext2 because:
+#   1. karpathy/tiny_shakespeare uses deprecated HuggingFace dataset scripts
+#   2. WikiText-2 uses modern Parquet format (no script issues)
+#   3. WikiText-2 is well-maintained by Salesforce
+#   4. Similar size (~2MB), suitable for quick experiments
+#
+# If you still want Shakespeare, use --dataset shakespeare which will
+# download directly from Karpathy's GitHub (bypasses HuggingFace).
 #
 # CRITICAL FINDING (from BFSNet v2.0.0):
 # --------------------------------------
@@ -52,7 +64,7 @@
 # ---------------------------------------------
 # Unlike vision models (FashionMNIST converges in ~10 epochs), language models
 # have different convergence characteristics:
-#   - Shakespeare (~1M chars): May need 10-20 epochs to converge
+#   - WikiText-2 (~2MB): May need 10-20 epochs to converge
 #   - TinyStories (~50M chars): May converge faster per epoch (more data)
 #   - Perplexity curves decay more gradually than accuracy curves
 #   - Policy behavior may change with more training
@@ -131,13 +143,18 @@ sweep:
   
   # Dataset: Text corpus for training
   # Options:
-  #   shakespeare: ~1M chars, literary style, fast training
-  #   tinystories: ~50M chars, simple stories, longer training
-  #   textfile:    Custom file via --data_path argument
-  dataset: shakespeare
+  #   wikitext2:   ~2MB, Wikipedia articles, fast training (DEFAULT, RECOMMENDED)
+  #   wikitext103: ~500MB, larger Wikipedia, longer training
+  #   shakespeare: ~1MB, literary style, via GitHub download
+  #   tinystories: ~2GB, simple children's stories, longest training
+  #   textfile:    Custom file via --text_filepath argument
+  #
+  # NOTE: wikitext2 is the default because it uses modern Parquet format
+  # and doesn't have the HuggingFace dataset script issues that shakespeare had.
+  dataset: wikitext2
   
   # ==========================================================================
-  # CRITICAL v1.0.0 POLICY PARAMETERS - THRESHOLD SWEEP
+  # CRITICAL v2.0.0 POLICY PARAMETERS - THRESHOLD SWEEP
   # ==========================================================================
   
   # Lambda efficiency: Node count penalty in reward
@@ -163,7 +180,7 @@ sweep:
   #   0.35: More lenient (expected: nearly full tree)
   #   0.30: Very lenient (expected: full tree)
   #
-  # CRITICAL: This is the KEY parameter to tune for v1.0.0!
+  # CRITICAL: This is the KEY parameter to tune for v2.0.0!
   greedy_threshold_list: [0.30, 0.35, 0.40, 0.42, 0.45, 0.50]
   
   # Number of rollouts: Stochastic exploration during training
@@ -234,7 +251,7 @@ sweep:
   #   5:   Early stopping point - check if model learns basics
   #   10:  Standard checkpoint - typical FashionMNIST convergence point
   #   15:  Extended training - may improve language models
-  #   20:  Full training - ensure convergence for Shakespeare
+  #   20:  Full training - ensure convergence for WikiText-2
   #
   # For TinyStories (larger dataset), consider:
   #   - 5 epochs may be sufficient due to more data
@@ -260,7 +277,8 @@ training:
   seed0: 42
   
   # Dataset (can be overridden by sweep.dataset above)
-  dataset: shakespeare
+  # Options: wikitext2, wikitext103, shakespeare, tinystories, textfile
+  dataset: wikitext2
 
 # ============================================================================
 # INFERENCE SETTINGS - CRITICAL FOR POLICY ANALYSIS
@@ -289,10 +307,10 @@ paths:
   # Dataset directory
   data_root: ./data
   
-  # Training script (BoeNet v1.0.0 with greedy_threshold support)
+  # Training script (BoeNet v2.0.0 with greedy_threshold support)
   train_script: train_boenet.py
   
-  # Inference script (BoeNet v1.0.0 with debug_policy support)
+  # Inference script (BoeNet v2.0.0 with debug_policy support)
   infer_script: infer_boenet.py
 
 # ============================================================================
@@ -493,7 +511,8 @@ paths:
 #      training.repeats: 3
 #
 # 2. Test on larger datasets:
-#    - TinyStories (~50M chars, children's stories)
+#    - WikiText-103 (~500MB, larger Wikipedia)
+#    - TinyStories (~2GB, children's stories)
 #    - Larger corpora for more challenging evaluation
 #
 # 3. Ablation studies:
@@ -539,7 +558,7 @@ paths:
 #
 # CONVERGENCE:
 #   BFSNet: FashionMNIST converges in ~10 epochs
-#   BoeNet: Shakespeare may need 15-20 epochs for full convergence
+#   BoeNet: WikiText-2 may need 15-20 epochs for full convergence
 #          TinyStories may converge faster per epoch (more data)
 #
 # EPOCHS SWEEP:
@@ -562,7 +581,7 @@ paths:
 # If the full 400-run sweep is too long, consider these reduced options:
 #
 # OPTION 1: Fix epochs, sweep everything else (100 runs, ~3-5 hours)
-#   epochs_list: [15]  # Best guess for Shakespeare convergence
+#   epochs_list: [15]  # Best guess for WikiText-2 convergence
 #   # Everything else unchanged
 #
 # OPTION 2: Fix seq_len and embed_dim, sweep policy and epochs (64 runs, ~2-3 hours)
@@ -588,5 +607,49 @@ paths:
 #
 # After finding promising configs with reduced sweeps, run full sweep on
 # the most interesting parameter ranges.
+#
+# ============================================================================
+
+# ============================================================================
+# AVAILABLE DATASETS
+# ============================================================================
+#
+# WikiText-2 (DEFAULT - RECOMMENDED):
+#   - HuggingFace: wikitext (config: wikitext-2-raw-v1)
+#   - Size: ~2MB
+#   - Content: Wikipedia articles
+#   - Format: Modern Parquet (no script issues)
+#   - Use: --dataset wikitext2
+#
+# WikiText-103:
+#   - HuggingFace: wikitext (config: wikitext-103-raw-v1)
+#   - Size: ~500MB
+#   - Content: Larger Wikipedia collection
+#   - Format: Modern Parquet
+#   - Use: --dataset wikitext103
+#
+# Shakespeare (via GitHub):
+#   - Source: Karpathy's char-rnn GitHub (direct download)
+#   - Size: ~1MB
+#   - Content: Complete works of Shakespeare
+#   - Format: Raw text file (bypasses HuggingFace)
+#   - Use: --dataset shakespeare
+#
+# TinyStories:
+#   - HuggingFace: roneneldan/TinyStories
+#   - Size: ~2GB
+#   - Content: Simple children's stories
+#   - Format: Modern Parquet
+#   - Use: --dataset tinystories
+#
+# BookCorpus:
+#   - HuggingFace: bookcorpus
+#   - Size: ~5GB
+#   - Content: 11,000 books
+#   - Use: --dataset bookcorpus
+#
+# Custom Text File:
+#   - Any local .txt file
+#   - Use: --dataset textfile --text_filepath /path/to/file.txt
 #
 # ============================================================================

@@ -1,0 +1,15 @@
+{
+  "acc_percent": 88.23,
+  "latency_ms_mean": 0.1228,
+  "latency_ms_p50": 0.1065,
+  "latency_ms_p90": 0.1252,
+  "latency_ms_p99": 0.3233,
+  "avg_nodes_per_example": 1.06,
+  "sparsity_percent": 84.86,
+  "device": "cpu",
+  "num_samples": null,
+  "model_bytes": 236235,
+  "debug_policy_mean_grow_prob": 0.4986,
+  "debug_policy_above_threshold_pct": 2.83,
+  "checkpoint_path": "runs/20251220_025958/k2_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p01_thr0p5_roll3_rep0/k2_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p01_thr0p5_roll3_rep0.pt"
+}

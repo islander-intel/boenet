@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-infer_boenet.py (v1.0.0 - Language Model)
+infer_boenet.py (v2.0.0 - Language Model)
 
 Load a trained BoeNet checkpoint and:
   1) Evaluate perplexity on test/validation split
@@ -18,7 +18,14 @@ Key Changes:
   - ADDED: Text dataset loading, perplexity calculation, text generation
   - UNCHANGED: Latency measurement, node counting, policy debug hooks
 
-v1.0.0 Debug Enhancements (same as BFSNet v2.0.0)
+v2.0.0 Dataset Changes:
+-----------------------
+  - Default dataset changed from shakespeare to wikitext2
+  - WikiText-2 uses modern HuggingFace Parquet format (no script issues)
+  - Shakespeare now downloads directly from Karpathy's GitHub
+  - Added wikitext103, bookcorpus, openwebtext options
+
+v2.0.0 Debug Enhancements (same as BFSNet v2.0.0)
 -------------------------------------------------
   - --debug_policy: Capture and analyze growth probabilities
   - --debug_nodes: Detailed node creation logging
@@ -38,22 +45,32 @@ Text Generation:
 Usage Examples
 --------------
 # Basic inference (perplexity evaluation):
-python3 infer_boenet.py --ckpt checkpoints/boenet_shakespeare.pt
+python3 infer_boenet.py --ckpt checkpoints/boenet_wikitext2.pt
 
 # Text generation:
-python3 infer_boenet.py --ckpt checkpoints/boenet_shakespeare.pt \\
-    --generate --prompt "To be or not to be" --max_tokens 200 --temperature 0.8
+python3 infer_boenet.py --ckpt checkpoints/boenet_wikitext2.pt \\
+    --generate --prompt "The history of" --max_tokens 200 --temperature 0.8
 
 # Debug mode (analyze policy - RECOMMENDED after training):
-python3 infer_boenet.py --ckpt checkpoints/boenet_shakespeare.pt \\
+python3 infer_boenet.py --ckpt checkpoints/boenet_wikitext2.pt \\
     --debug_policy --samples 1000 --cpu
 
 # Force growth (verify hook works):
-python3 infer_boenet.py --ckpt checkpoints/boenet_shakespeare.pt \\
+python3 infer_boenet.py --ckpt checkpoints/boenet_wikitext2.pt \\
     --force_growth --samples 100 --cpu
 
+Available Datasets:
+-------------------
+  wikitext2:   ~2MB Wikipedia (DEFAULT, RECOMMENDED)
+  wikitext103: ~500MB Wikipedia
+  shakespeare: ~1MB literary text (via GitHub)
+  tinystories: ~2GB children's stories
+  bookcorpus:  ~5GB books
+  openwebtext: ~40GB web text
+  textfile:    Custom local text file
+
 Author: BoeNet project (converted from BFSNet)
-Version: 1.0.0
+Version: 2.0.0
 Date: 2025-12-22
 """
 
@@ -115,7 +132,7 @@ def load_model(
     device: torch.device,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     """
-    Load BoeNet v1.0.0 checkpoint.
+    Load BoeNet v2.0.0 checkpoint.
     
     Parameters
     ----------
@@ -135,8 +152,8 @@ def load_model(
     version = cfg.get("version", "unknown")
     model_type = cfg.get("model_type", "unknown")
     
-    if version != "1.0.0":
-        print(f"[warning] Checkpoint version is '{version}', expected '1.0.0'. Proceeding anyway...")
+    if version not in ("1.0.0", "2.0.0"):
+        print(f"[warning] Checkpoint version is '{version}', expected '1.0.0' or '2.0.0'. Proceeding anyway...")
     if model_type != "language":
         print(f"[warning] Model type is '{model_type}', expected 'language'. Proceeding anyway...")
     
@@ -154,7 +171,7 @@ def load_model(
     pruning_threshold = float(_cfg_get(cfg, "pruning_threshold", 1e-3))
     pooling_mode = str(_cfg_get(cfg, "pooling_mode", "mean"))
     
-    print(f"[infer] Loading v1.0.0 checkpoint: {ckpt_path}")
+    print(f"[infer] Loading v2.0.0 checkpoint: {ckpt_path}")
     print(f"[infer] Model config: vocab_size={vocab_size}, embed_dim={embed_dim}, "
           f"hidden_dim={hidden_dim}, seq_len={seq_len}")
     print(f"[infer] Architecture: max_depth={max_depth}, max_children={max_children}, "
@@ -753,31 +770,43 @@ def build_summary_json(
 
 def main():
     p = argparse.ArgumentParser(
-        description="BoeNet v1.0.0 Language Model Inference (Debug Enhanced)",
+        description="BoeNet v2.0.0 Language Model Inference (Debug Enhanced)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Usage Examples:
 ---------------
 # Basic perplexity evaluation:
-python3 infer_boenet.py --ckpt checkpoints/boenet_shakespeare.pt
+python3 infer_boenet.py --ckpt checkpoints/boenet_wikitext2.pt
 
 # Text generation:
-python3 infer_boenet.py --ckpt checkpoints/boenet_shakespeare.pt \\
-    --generate --prompt "To be or not" --max_tokens 200 --temperature 0.8
+python3 infer_boenet.py --ckpt checkpoints/boenet_wikitext2.pt \\
+    --generate --prompt "The history of" --max_tokens 200 --temperature 0.8
 
 # Debug policy analysis:
-python3 infer_boenet.py --ckpt checkpoints/boenet_shakespeare.pt \\
+python3 infer_boenet.py --ckpt checkpoints/boenet_wikitext2.pt \\
     --debug_policy --samples 1000 --cpu
+
+Available Datasets:
+-------------------
+  wikitext2:   ~2MB Wikipedia (DEFAULT, RECOMMENDED)
+  wikitext103: ~500MB Wikipedia
+  shakespeare: ~1MB literary text (via GitHub)
+  tinystories: ~2GB children's stories
+  bookcorpus:  ~5GB books
+  openwebtext: ~40GB web text
+  textfile:    Custom local text file
 
 See docs/architecture.md for complete threshold tuning guide.
         """
     )
     
     # Checkpoint
-    p.add_argument("--ckpt", type=str, default="checkpoints/boenet_shakespeare.pt",
+    p.add_argument("--ckpt", type=str, default="checkpoints/boenet_wikitext2.pt",
                    help="Path to .pt checkpoint")
     p.add_argument("--dataset", type=str, default=None,
-                   help="Dataset override (shakespeare, tinystories)")
+                   choices=["wikitext2", "wikitext103", "shakespeare", "tinystories",
+                            "bookcorpus", "openwebtext", "textfile"],
+                   help="Dataset override (default: use checkpoint config)")
     
     # Evaluation
     p.add_argument("--batch_size", type=int, default=64,
@@ -838,7 +867,7 @@ See docs/architecture.md for complete threshold tuning guide.
     # Get vocab_size and seq_len
     vocab_size = cfg.get("vocab_size", 256)
     seq_len = cfg.get("seq_len", 128)
-    dataset_name = args.dataset or cfg.get("dataset", "shakespeare")
+    dataset_name = args.dataset or cfg.get("dataset", "wikitext2")
     
     # Create tokenizer
     tokenizer = CharTokenizer()

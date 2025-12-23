@@ -1,0 +1,172 @@
+
+===============================================================================
+⚠️  WARNING: Default greedy_threshold=0.5 May Result in Root-Only Inference!
+===============================================================================
+ISSUE:
+  The policy typically learns grow_prob values around 0.40-0.50 during
+  training. With the default greedy threshold of 0.5, most decisions
+  will FAIL the threshold check, resulting in ZERO children created.
+
+EXPECTED BEHAVIOR:
+  - Training mode: Uses ~6-12 nodes (stochastic Bernoulli sampling)
+  - Inference mode: Uses 1 node (root-only, greedy threshold blocks growth)
+
+RECOMMENDATION:
+  1. After training, run with --debug_policy to measure learned grow_prob:
+     python3 infer_fmnist_bfs.py --ckpt runs/20251220_025958/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p0_thr0p5_roll3_rep0/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p0_thr0p5_roll3_rep0.pt --debug_policy --cpu
+
+  2. Then retrain with threshold ≈ mean_grow_prob - 0.03:
+     Example: If mean_grow_prob = 0.445, use --greedy_threshold 0.42
+
+  3. Or use training matrix to sweep (λ, threshold) pairs:
+     python3 bfs_training_matrix.py --config configs/threshold_sweep.yaml
+
+See docs/architecture.md for detailed analysis.
+===============================================================================
+
+[sanity:fashionmnist] batch=64x784 dtype=float32 xmin=-0.424 xmax=2.821 y[min,max]=[0,9] label_counts_head=(0:11, 1:5, 2:4, 3:3, 4:3), assert_flatten=OK
+BFSNet v2.0.0 (
+  input_dim=784, hidden_dim=64, output_dim=10,
+  max_depth=2, max_children=3,
+  greedy_threshold=0.5000,
+  sibling_embed=True, sibling_scale=0.1250,
+  use_pruning=False, pruning_mode='learned',
+  pooling_mode='mean'
+)
+[dims] FashionMNIST: input_dim=784, num_classes=10
+[run] epochs=10 | batch_size=64 | lr=0.001 | wd=0.0 | grad_clip=1.0
+      policy: num_rollouts=3, λ_eff=0.0, β_ent=0.01, β_policy=0.5
+      greedy_threshold=0.5 (inference)
+      pooling_mode=mean
+      pruning losses: L1*=0.0, KL*=0.0 (keep_rate=0.5)
+[node metrics] Theoretical max nodes per example per rollout: 13
+               With 3 rollouts: 39 total
+               Batch-level max (B=64): 832 per rollout
+[opt] adamw | lr=0.001 | wd=0.0
+[lr] schedule=cosine
+
+[epoch 1/10] lr=0.001000
+[probe e=1 b=0] loss=0.821439
+  logits: mean=0.0625 std=0.1683 min=-0.7453 max=0.6447
+  root_fc.weight: grad_norm=1.024252e+00
+  output_fc.weight: grad_norm=2.599985e-01
+  ||root_fc||_2=7.311425e-01
+  ||output_fc||_2=7.463145e-01
+[probe e=1 b=1] loss=0.801674
+  logits: mean=0.0493 std=0.2307 min=-0.8526 max=1.7394
+  root_fc.weight: grad_norm=6.443438e-01
+  output_fc.weight: grad_norm=2.585707e-01
+  ||root_fc||_2=7.320889e-01
+  ||output_fc||_2=7.448351e-01
+  Train Loss: -1.1095 (cls=0.5468, policy=-3.3125) | Val Loss: 0.4819
+  Train Acc: 80.78% | Val Acc: 83.27% | Avg Total Nodes/Example: 14.19
+  (Sparsity: 36.38% of theoretical max 39 nodes)
+
+[epoch 2/10] lr=0.000976
+[probe e=2 b=0] loss=-1.123657
+  logits: mean=-1.6293 std=4.3758 min=-11.3355 max=12.0750
+  root_fc.weight: grad_norm=5.324330e-01
+  output_fc.weight: grad_norm=1.006199e+00
+  ||root_fc||_2=3.144384e+00
+  ||output_fc||_2=1.290980e+00
+[probe e=2 b=1] loss=-1.380147
+  logits: mean=-1.5293 std=4.1472 min=-11.7898 max=13.4202
+  root_fc.weight: grad_norm=5.440149e-01
+  output_fc.weight: grad_norm=8.752483e-01
+  ||root_fc||_2=3.148189e+00
+  ||output_fc||_2=1.291543e+00
+  Train Loss: -1.2823 (cls=0.3779, policy=-3.3205) | Val Loss: 0.4099
+  Train Acc: 86.18% | Val Acc: 85.40% | Avg Total Nodes/Example: 14.20
+  (Sparsity: 36.42% of theoretical max 39 nodes)
+
+[epoch 3/10] lr=0.000905
+  Train Loss: -1.3187 (cls=0.3367, policy=-3.3108) | Val Loss: 0.3844
+  Train Acc: 87.61% | Val Acc: 86.18% | Avg Total Nodes/Example: 14.19
+  (Sparsity: 36.38% of theoretical max 39 nodes)
+
+[epoch 4/10] lr=0.000794
+  Train Loss: -1.3521 (cls=0.3084, policy=-3.3209) | Val Loss: 0.3720
+  Train Acc: 88.55% | Val Acc: 86.37% | Avg Total Nodes/Example: 14.27
+  (Sparsity: 36.59% of theoretical max 39 nodes)
+
+[epoch 5/10] lr=0.000655
+  Train Loss: -1.3752 (cls=0.2841, policy=-3.3188) | Val Loss: 0.3503
+  Train Acc: 89.44% | Val Acc: 87.52% | Avg Total Nodes/Example: 14.28
+  (Sparsity: 36.60% of theoretical max 39 nodes)
+
+[epoch 6/10] lr=0.000500
+  Train Loss: -1.3979 (cls=0.2650, policy=-3.3258) | Val Loss: 0.3307
+  Train Acc: 90.14% | Val Acc: 88.32% | Avg Total Nodes/Example: 14.32
+  (Sparsity: 36.71% of theoretical max 39 nodes)
+
+[epoch 7/10] lr=0.000345
+  Train Loss: -1.4141 (cls=0.2473, policy=-3.3228) | Val Loss: 0.3278
+  Train Acc: 90.82% | Val Acc: 88.40% | Avg Total Nodes/Example: 14.24
+  (Sparsity: 36.51% of theoretical max 39 nodes)
+
+[epoch 8/10] lr=0.000206
+  Train Loss: -1.4285 (cls=0.2324, policy=-3.3219) | Val Loss: 0.3224
+  Train Acc: 91.37% | Val Acc: 88.50% | Avg Total Nodes/Example: 14.26
+  (Sparsity: 36.57% of theoretical max 39 nodes)
+
+[epoch 9/10] lr=0.000095
+  Train Loss: -1.4373 (cls=0.2230, policy=-3.3206) | Val Loss: 0.3152
+  Train Acc: 91.79% | Val Acc: 88.98% | Avg Total Nodes/Example: 14.29
+  (Sparsity: 36.63% of theoretical max 39 nodes)
+
+[epoch 10/10] lr=0.000024
+  Train Loss: -1.4481 (cls=0.2163, policy=-3.3289) | Val Loss: 0.3122
+  Train Acc: 92.03% | Val Acc: 89.17% | Avg Total Nodes/Example: 14.28
+  (Sparsity: 36.63% of theoretical max 39 nodes)
+
+Saved checkpoint → runs/20251220_025958/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p0_thr0p5_roll3_rep0/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p0_thr0p5_roll3_rep0.pt
+Best val loss: 0.3122 at epoch 10
+
+===============================================================================
+POST-TRAINING: Greedy Threshold Tuning Recommendations
+===============================================================================
+
+Your model was trained with:
+  lambda_efficiency = 0.0
+  greedy_threshold  = 0.5
+
+NEXT STEPS:
+
+1. Measure the learned grow_prob distribution:
+   python3 infer_fmnist_bfs.py --ckpt runs/20251220_025958/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p0_thr0p5_roll3_rep0/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p0_thr0p5_roll3_rep0.pt \
+       --debug_policy --node_samples 1000 --cpu
+
+   This will show you:
+   - Mean grow_prob (typically 0.40-0.50)
+   - % of decisions above threshold 0.5
+   - Distribution histogram
+
+2. Based on the measured mean_grow_prob, choose optimal threshold:
+
+   If mean_grow_prob ≈ 0.445, recommended settings:
+     • threshold = 0.50 → Root-only (1 node, max efficiency)
+     • threshold = 0.42 → Balanced (~6-8 nodes, good accuracy)
+     • threshold = 0.35 → Dense (~10-12 nodes, max accuracy)
+
+   General rule: optimal_threshold ≈ mean_grow_prob - 0.03
+
+3. Retrain with optimal threshold (if needed):
+   python3 train_fmnist_bfs.py \
+       --lambda_efficiency 0.0 \
+       --greedy_threshold 0.42 \
+       --epochs 10
+
+4. OR run full (λ, threshold) sweep to find optimal pair:
+   python3 bfs_training_matrix.py \
+       --config configs/threshold_sweep.yaml
+
+EMPIRICAL FINDINGS:
+  • Higher λ (0.05) often gives BETTER accuracy than lower λ (0.01)
+  • Policy learns grow_prob ≈ 0.44-0.45 regardless of λ value
+  • Default threshold=0.5 typically results in root-only inference
+  • Root-only achieves ~86-87% accuracy on FashionMNIST
+
+See docs/architecture.md for complete analysis and recommendations.
+===============================================================================
+
+__SUMMARY__ {"run": {"seed": 42, "epochs": 10, "batch_size": 64}, "optimizer": {"name": "adamw", "lr": 0.001, "weight_decay": 0.0}, "model": {"hidden_dim": 64, "max_depth": 2, "max_children": 3, "pooling_mode": "mean", "greedy_threshold": 0.5}, "policy": {"num_rollouts": 3, "lambda_efficiency": 0.0, "beta_entropy": 0.01, "beta_policy": 0.5}, "results": {"best_val_loss": 0.3122392370700836, "best_epoch": 10, "final_val_acc": 89.16666666666667}, "time": {"total_s": 238.49234236899065, "epoch_avg_s": 23.849233045597792, "last_epoch_s": 27.636713529995177}, "artifacts": {"checkpoint": "runs/20251220_025958/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p0_thr0p5_roll3_rep0/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p0_thr0p5_roll3_rep0.pt"}}

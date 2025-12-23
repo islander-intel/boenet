@@ -1,61 +1,70 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BoeNet: BFS-Inspired Language Model with REINFORCE Policy Gradients
+BoeNet Utilities Package
 
-Converted from BFSNet v2.0.0 (Vision) to BoeNet v1.0.0 (Language)
+This package provides utility functions for BoeNet experiments:
+  - data_utils: Dataset loading and preprocessing
+  - gating: GrowthPolicyNet and pruning gates (unchanged from BFSNet)
+  - sparse_utils: Sparse tensor operations (unchanged from BFSNet)
+  - optim: Optimizer builders (unchanged from BFSNet)
+  - schedules: Value schedulers (unchanged from BFSNet)
+  - config_utils: YAML configuration loading (unchanged from BFSNet)
+  - metrics: Evaluation metrics including perplexity
+  - profiler: Performance profiling utilities
 
-This package provides:
-  - BoeNet: Language model with adaptive BFS tree expansion
-  - CharTokenizer: Character-level tokenization
-  - TiktokenWrapper: BPE tokenization (requires tiktoken)
-  - Loss functions for REINFORCE policy gradients
-  - Data utilities for Shakespeare and TinyStories datasets
+Changelog
+---------
+v2.0.0 (2025-12-22):
+  - BREAKING CHANGE: Updated imports for redesigned data_utils.py
+  - REMOVED: build_shakespeare_datasets (replaced by load_shakespeare_from_github)
+  - REMOVED: build_tinystories_datasets (replaced by load_huggingface_text_dataset)
+  - ADDED: load_shakespeare_from_github - direct GitHub download
+  - ADDED: load_huggingface_text_dataset - generic HuggingFace loader
+  - ADDED: load_text_file - local text file loader
 
-The core insight: The BFS+REINFORCE algorithm is vector-agnostic.
-Just swap input/output layers, keep everything else unchanged.
+v1.0.0 (2025-12-22):
+  - Initial BoeNet release with language model support
 
-Quick Start
------------
->>> from boenet.model import BoeNet
->>> from boenet.tokenizer import CharTokenizer
->>> from boenet.utils.data_utils import get_dataloaders
->>>
->>> # Load Shakespeare dataset
->>> train_loader, val_loader, vocab_size = get_dataloaders(
-...     "shakespeare", batch_size=64, seq_len=128
-... )
->>>
->>> # Create model
->>> model = BoeNet(
-...     vocab_size=vocab_size,
-...     embed_dim=64,
-...     hidden_dim=128,
-...     max_depth=2,
-...     max_children=3,
-...     greedy_threshold=0.42,
-... )
->>>
->>> # Training loop
->>> for input_ids, labels in train_loader:
-...     outputs, policy_loss, rewards, node_counts = model(
-...         input_ids, num_rollouts=3, lambda_efficiency=0.05, labels=labels
-...     )
-...     # Compute loss, backprop, etc.
-
-Author: BoeNet project (converted from BFSNet)
-Version: 1.0.0
+Author: BoeNet project
+Version: 2.0.0
 Date: 2025-12-22
 """
 
-__version__ = "1.0.0"
-__author__ = "BoeNet project"
-
-from boenet.model import BoeNet
-from boenet.tokenizer import CharTokenizer, get_tokenizer
+from boenet.utils.data_utils import (
+    # Unified accessor (primary entry point)
+    get_dataloaders,
+    
+    # Tokenization
+    CharTokenizer,
+    TextDataset,
+    
+    # Language dataset loaders (NEW in v2.0.0)
+    load_shakespeare_from_github,
+    load_huggingface_text_dataset,
+    load_text_file,
+    
+    # Utilities
+    set_seed,
+    get_device,
+    SplitConfig,
+)
 
 __all__ = [
-    "BoeNet",
+    # Unified accessor (primary entry point)
+    "get_dataloaders",
+    
+    # Tokenization
     "CharTokenizer",
-    "get_tokenizer",
+    "TextDataset",
+    
+    # Language dataset loaders (NEW in v2.0.0)
+    "load_shakespeare_from_github",
+    "load_huggingface_text_dataset",
+    "load_text_file",
+    
+    # Utilities
+    "set_seed",
+    "get_device",
+    "SplitConfig",
 ]

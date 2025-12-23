@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-boenet_training_matrix.py (v1.0.0 - Language Model)
+boenet_training_matrix.py (v2.0.0 - Language Model)
 
-Run a *full factorial* matrix of BoeNet experiments on Shakespeare/TinyStories by spawning:
+Run a *full factorial* matrix of BoeNet experiments on WikiText-2/Shakespeare/TinyStories by spawning:
   * train_boenet.py   (training: logs + checkpoint)
   * infer_boenet.py   (inference: prints ONE JSON object OR a plain-text perplexity line)
 
@@ -14,9 +14,17 @@ Key Changes:
   - ADDED: vocab_size, seq_len, embed_dim sweep parameters
   - CHANGED: Accuracy columns -> Perplexity columns
   - CHANGED: Calls train_boenet.py and infer_boenet.py instead of BFSNet scripts
+  - CHANGED: Default dataset from shakespeare to wikitext2 (v2.0.0)
   - UNCHANGED: All sweep logic, factorial matrix, subprocess runners, progress bar
 
-v1.0.0 Greedy Threshold Enhancement (same as BFSNet v2.0.0)
+v2.0.0 Dataset Changes:
+-----------------------
+  - Default dataset changed from shakespeare to wikitext2
+  - WikiText-2 uses modern HuggingFace Parquet format (no script issues)
+  - Shakespeare now downloads directly from Karpathy's GitHub
+  - Added wikitext103, bookcorpus, openwebtext options
+
+v2.0.0 Greedy Threshold Enhancement (same as BFSNet v2.0.0)
 -----------------------------------------------------------
   - greedy_threshold sweep parameter (0.30-0.50 range)
   - lambda_efficiency sweep parameter (0.0-0.1 range)
@@ -60,9 +68,9 @@ them in the config file. We generate *all* combinations across these lists:
   * vocab_size:             --vocab_size_list (e.g., 256)
   * seq_len:                --seq_len_list (e.g., 64,128,256)
   * embed_dim:              --embed_dim_list (e.g., 32,64,128)
-  * dataset:                --dataset (shakespeare, tinystories)
+  * dataset:                --dataset (wikitext2, wikitext103, shakespeare, tinystories)
 
-  v1.0.0 Policy Parameters:
+  v2.0.0 Policy Parameters:
   * lambda_efficiency:      --lambda_efficiency_list (e.g., 0.0,0.01,0.05,0.1)
   * greedy_threshold:       --greedy_threshold_list  (e.g., 0.30,0.35,0.40,0.42,0.45,0.50)
   * num_rollouts:           --num_rollouts_list      (typically 3)
@@ -91,14 +99,14 @@ Config File Format (YAML)
 -------------------------
 Example configs/boenet-config.yaml:
 ```yaml
-# BoeNet v1.0.0 Training Matrix Configuration
+# BoeNet v2.0.0 Training Matrix Configuration
 sweep:
   # Language Model Parameters
   vocab_size_list: [256]
   seq_len_list: [64, 128]
   embed_dim_list: [32, 64]
   
-  # v1.0.0 Policy Parameters
+  # v2.0.0 Policy Parameters
   lambda_efficiency_list: [0.0, 0.05, 0.1]
   greedy_threshold_list: [0.40, 0.42, 0.50]
   num_rollouts_list: [3]
@@ -119,7 +127,7 @@ training:
   epochs: 10
   repeats: 1
   seed0: 42
-  dataset: shakespeare
+  dataset: wikitext2
 
 inference:
   infer_samples: 1000
@@ -133,6 +141,16 @@ paths:
   infer_script: infer_boenet.py
 ```
 
+Available Datasets:
+-------------------
+  wikitext2:   ~2MB Wikipedia (DEFAULT, RECOMMENDED)
+  wikitext103: ~500MB Wikipedia
+  shakespeare: ~1MB literary text (via GitHub)
+  tinystories: ~2GB children's stories
+  bookcorpus:  ~5GB books
+  openwebtext: ~40GB web text
+  textfile:    Custom local text file
+
 Progress Bar
 ------------
 This script uses tqdm to display progress:
@@ -143,7 +161,7 @@ This script uses tqdm to display progress:
   - Current configuration tag
 
 Author: BoeNet project (converted from BFSNet)
-Version: 1.0.0
+Version: 2.0.0
 Date: 2025-12-22
 """
 
@@ -180,12 +198,12 @@ except ImportError:
 
 # ------------------------------ Regex parsers ------------------------------ #
 
-# Trainer epoch line (v1.0.0 format for language model)
-RE_EPOCH_V1_LM = re.compile(
+# Trainer epoch line (v2.0.0 format for language model)
+RE_EPOCH_V2_LM = re.compile(
     r"Train Loss:\s*([0-9.eE+-]+)\s*\(lm=([0-9.eE+-]+),\s*policy=([0-9.eE+-]+)\)\s*\|\s*"
     r"Val Loss:\s*([0-9.eE+-]+)\s*\n\s*"
     r"Train PPL:\s*([0-9.]+)\s*\|\s*Val PPL:\s*([0-9.]+)\s*\|\s*"
-    r"Avg Nodes/Position:\s*([0-9.]+)",
+    r"Avg.*Nodes.*Position:\s*([0-9.]+)",
     re.MULTILINE
 )
 
@@ -313,11 +331,12 @@ def _exp_tag(
     lambda_eff: float,
     greedy_thresh: float,
     num_rollouts: int,
+    epochs: int,
 ) -> str:
     """
-    Compact but unique tag for a factorial cell (v1.0.0 language model).
+    Compact but unique tag for a factorial cell (v2.0.0 language model).
     
-    Includes embed_dim and seq_len for language model experiments.
+    Includes embed_dim, seq_len, and epochs for language model experiments.
     """
     parts = [
         f"k{k}",
@@ -332,6 +351,7 @@ def _exp_tag(
         f"lam{_slug(lambda_eff)}",
         f"thr{_slug(greedy_thresh)}",
         f"roll{num_rollouts}",
+        f"ep{epochs}",
     ]
     return "_".join(parts)
 
@@ -351,11 +371,12 @@ def build_factorial_matrix(
     num_rollouts_list: Sequence[int],
     beta_entropy_list: Sequence[float],
     beta_policy_list: Sequence[float],
+    epochs_list: Sequence[int],
     vocab_size: int = 256,
-    dataset: str = "shakespeare",
+    dataset: str = "wikitext2",
 ) -> List[Dict[str, Any]]:
     """
-    Build the full factorial list of experiment configs (v1.0.0 Language Model).
+    Build the full factorial list of experiment configs (v2.0.0 Language Model).
     
     K=0 (Dense Baseline) Handling:
     ------------------------------
@@ -369,7 +390,7 @@ def build_factorial_matrix(
     
     K>0 (BFS Tree) Handling:
     ------------------------
-    For K>0, all parameters are swept as specified including the v1.0.0
+    For K>0, all parameters are swept as specified including the v2.0.0
     policy parameters (lambda_efficiency, greedy_threshold).
     """
     base_common = dict(
@@ -391,29 +412,31 @@ def build_factorial_matrix(
                         for lr in lrs:
                             for bs in batch_sizes:
                                 for wd in weight_decays:
-                                    tag = _exp_tag(k, "mean", hd, ed, sl, lr, bs, wd, 1, 0.0, 0.5, 1)
-                                    cfg = _merge(
-                                        base_common,
-                                        tag=tag,
-                                        batch_size=bs,
-                                        hidden_dim=hd,
-                                        embed_dim=ed,
-                                        seq_len=sl,
-                                        lr=lr,
-                                        weight_decay=wd,
-                                        max_depth=1,
-                                        max_children=0,
-                                        pooling_mode="mean",
-                                        # v1.0.0 policy params (ignored for K=0)
-                                        num_rollouts=1,
-                                        lambda_efficiency=0.0,
-                                        beta_entropy=0.01,
-                                        beta_policy=0.5,
-                                        greedy_threshold=0.5,
-                                    )
-                                    exps.append(cfg)
+                                    for ep in epochs_list:
+                                        tag = _exp_tag(k, "mean", hd, ed, sl, lr, bs, wd, 1, 0.0, 0.5, 1, ep)
+                                        cfg = _merge(
+                                            base_common,
+                                            tag=tag,
+                                            batch_size=bs,
+                                            hidden_dim=hd,
+                                            embed_dim=ed,
+                                            seq_len=sl,
+                                            lr=lr,
+                                            weight_decay=wd,
+                                            max_depth=1,
+                                            max_children=0,
+                                            pooling_mode="mean",
+                                            epochs=ep,
+                                            # v2.0.0 policy params (ignored for K=0)
+                                            num_rollouts=1,
+                                            lambda_efficiency=0.0,
+                                            beta_entropy=0.01,
+                                            beta_policy=0.5,
+                                            greedy_threshold=0.5,
+                                        )
+                                        exps.append(cfg)
         else:
-            # K>0: Full sweep including v1.0.0 policy parameters
+            # K>0: Full sweep including v2.0.0 policy parameters
             for depth in max_depths:
                 for hd in hidden_dims:
                     for ed in embed_dims:
@@ -427,37 +450,39 @@ def build_factorial_matrix(
                                                     for num_roll in num_rollouts_list:
                                                         for beta_ent in beta_entropy_list:
                                                             for beta_pol in beta_policy_list:
-                                                                tag = _exp_tag(
-                                                                    k, pooling, hd, ed, sl, lr, bs, wd, depth,
-                                                                    lambda_eff, greedy_thresh, num_roll
-                                                                )
-                                                                cfg = _merge(
-                                                                    base_common,
-                                                                    tag=tag,
-                                                                    batch_size=bs,
-                                                                    hidden_dim=hd,
-                                                                    embed_dim=ed,
-                                                                    seq_len=sl,
-                                                                    lr=lr,
-                                                                    weight_decay=wd,
-                                                                    max_depth=depth,
-                                                                    max_children=k,
-                                                                    pooling_mode=pooling,
-                                                                    # v1.0.0 policy params
-                                                                    num_rollouts=num_roll,
-                                                                    lambda_efficiency=lambda_eff,
-                                                                    beta_entropy=beta_ent,
-                                                                    beta_policy=beta_pol,
-                                                                    greedy_threshold=greedy_thresh,
-                                                                )
-                                                                exps.append(cfg)
+                                                                for ep in epochs_list:
+                                                                    tag = _exp_tag(
+                                                                        k, pooling, hd, ed, sl, lr, bs, wd, depth,
+                                                                        lambda_eff, greedy_thresh, num_roll, ep
+                                                                    )
+                                                                    cfg = _merge(
+                                                                        base_common,
+                                                                        tag=tag,
+                                                                        batch_size=bs,
+                                                                        hidden_dim=hd,
+                                                                        embed_dim=ed,
+                                                                        seq_len=sl,
+                                                                        lr=lr,
+                                                                        weight_decay=wd,
+                                                                        max_depth=depth,
+                                                                        max_children=k,
+                                                                        pooling_mode=pooling,
+                                                                        epochs=ep,
+                                                                        # v2.0.0 policy params
+                                                                        num_rollouts=num_roll,
+                                                                        lambda_efficiency=lambda_eff,
+                                                                        beta_entropy=beta_ent,
+                                                                        beta_policy=beta_pol,
+                                                                        greedy_threshold=greedy_thresh,
+                                                                    )
+                                                                    exps.append(cfg)
     return exps
 
 
 # -------------------------- Run recorders & helpers ------------------------- #
 
 class RunRecorder:
-    """Collects metrics for one training run (v1.0.0 Language Model)."""
+    """Collects metrics for one training run (v2.0.0 Language Model)."""
     def __init__(self, run_id: int, tag: str):
         self.run_id = run_id
         self.tag = tag
@@ -467,9 +492,9 @@ class RunRecorder:
         self.best_epoch: Optional[int] = None
         self.trainer_summary: Optional[Dict[str, Any]] = None
 
-    def parse_v1_epoch_lines(self, text: str):
-        """Parse v1.0.0 epoch output format for language model."""
-        for m in RE_EPOCH_V1_LM.finditer(text):
+    def parse_v2_epoch_lines(self, text: str):
+        """Parse v2.0.0 epoch output format for language model."""
+        for m in RE_EPOCH_V2_LM.finditer(text):
             train_loss = float(m.group(1))
             lm_loss = float(m.group(2))
             policy_loss = float(m.group(3))
@@ -541,7 +566,7 @@ class RunRecorder:
             "batch_size", "hidden_dim", "embed_dim", "seq_len", "vocab_size",
             "max_depth", "max_children", "pooling_mode", "lr", "weight_decay", 
             "lr_schedule", "grad_clip", "opt", "dataset",
-            # v1.0.0 policy params
+            # v2.0.0 policy params
             "num_rollouts", "lambda_efficiency", "beta_entropy", "beta_policy",
             "greedy_threshold",
             "seed",
@@ -564,7 +589,7 @@ class RunRecorder:
                 "infer_device": infer.get("device"),
                 "model_bytes": infer.get("model_bytes"),
                 "checkpoint_path": infer.get("checkpoint_path"),
-                # v1.0.0 policy analysis
+                # v2.0.0 policy analysis
                 "infer_mean_grow_prob": infer.get("debug_policy_mean_grow_prob"),
                 "infer_above_threshold_pct": infer.get("debug_policy_above_threshold_pct"),
             })
@@ -654,8 +679,8 @@ def run_training(train_script: str, python_exe: str, run_dir: Path,
 
     stdout_text, ret = _tee_process(cmd, log_file=log_path)
     
-    # Parse v1.0.0 format (language model)
-    recorder.parse_v1_epoch_lines(stdout_text)
+    # Parse v2.0.0 format (language model)
+    recorder.parse_v2_epoch_lines(stdout_text)
     
     # Parse summary JSON
     for line in stdout_text.split('\n'):
@@ -707,7 +732,7 @@ def _parse_infer_json_from_stdout(text: str) -> Optional[Dict[str, Any]]:
     avg_nodes = lk.get("avg_nodes_per_position", lk.get("avg_nodes"))
     sparsity = lk.get("sparsity_percent")
 
-    # v1.0.0 policy analysis
+    # v2.0.0 policy analysis
     mean_grow = lk.get("debug_policy_mean_grow_prob", lk.get("debug_policy_mean"))
     above_thresh = lk.get("debug_policy_above_threshold_pct")
 
@@ -815,10 +840,10 @@ def run_inference(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Run a full-factorial matrix of BoeNet v1.0.0 language model experiments."
+        description="Run a full-factorial matrix of BoeNet v2.0.0 language model experiments."
     )
     # Config file
-    p.add_argument("--config", type=str, default="configs/boenet-config.yaml",
+    p.add_argument("--config", type=str, default="configs/experiment-config.yaml",
                    help="Path to YAML config file")
     
     # Scripts
@@ -835,7 +860,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--repeats", type=int, default=None)
     p.add_argument("--seed0", type=int, default=None)
     p.add_argument("--dataset", type=str, default=None,
-                   help="Dataset (shakespeare, tinystories)")
+                   help="Dataset (wikitext2, wikitext103, shakespeare, tinystories)")
 
     # Language Model Parameters (NEW)
     p.add_argument("--vocab_size", type=int, default=None)
@@ -844,7 +869,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--embed_dim_list", type=str, default=None,
                    help="Comma-separated embed_dim values (e.g., 32,64,128)")
 
-    # v1.0.0 Policy parameters
+    # v2.0.0 Policy parameters
     p.add_argument("--lambda_efficiency_list", type=str, default=None,
                    help="Comma-separated lambda values (e.g., 0.0,0.01,0.05,0.1)")
     p.add_argument("--greedy_threshold_list", type=str, default=None,
@@ -915,9 +940,9 @@ def main():
     vocab_size = get_val(args.vocab_size, 'sweep', 'vocab_size', 256)
     seq_len_list = get_list_int(args.seq_len_list, 'sweep', 'seq_len_list', "128")
     embed_dim_list = get_list_int(args.embed_dim_list, 'sweep', 'embed_dim_list', "64")
-    dataset = get_val(args.dataset, 'training', 'dataset', "shakespeare")
+    dataset = get_val(args.dataset, 'training', 'dataset', "wikitext2")
 
-    # v1.0.0 Policy parameters
+    # v2.0.0 Policy parameters
     lambda_efficiency_list = get_list_float(args.lambda_efficiency_list, 'sweep', 'lambda_efficiency_list', "0.05")
     greedy_threshold_list = get_list_float(args.greedy_threshold_list, 'sweep', 'greedy_threshold_list', "0.5")
     num_rollouts_list = get_list_int(args.num_rollouts_list, 'sweep', 'num_rollouts_list', "3")
@@ -948,6 +973,17 @@ def main():
     cpu_only = get_val(args.cpu_only, 'inference', 'cpu_only', True)
     debug_policy = get_val(args.debug_policy, 'inference', 'debug_policy', True)
 
+    # Handle epochs dimension
+    epochs_list = []
+    if args.epochs_list and args.epochs_list.strip():
+        epochs_list = _parse_list_int(args.epochs_list)
+    else:
+        cfg_epochs_list = get_config_value(config, 'sweep', 'epochs_list', None)
+        if cfg_epochs_list:
+            epochs_list = [int(x) for x in cfg_epochs_list]
+        else:
+            epochs_list = [int(epochs)]
+
     # Timestamped output root
     ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     out_root = Path(save_root) / ts
@@ -969,40 +1005,19 @@ def main():
         num_rollouts_list=num_rollouts_list,
         beta_entropy_list=beta_entropy_list,
         beta_policy_list=beta_policy_list,
+        epochs_list=epochs_list,
         vocab_size=vocab_size,
         dataset=dataset,
     )
 
-    # Handle epochs dimension
-    epochs_list = []
-    if args.epochs_list and args.epochs_list.strip():
-        epochs_list = _parse_list_int(args.epochs_list)
-    else:
-        cfg_epochs_list = get_config_value(config, 'sweep', 'epochs_list', None)
-        if cfg_epochs_list:
-            epochs_list = [int(x) for x in cfg_epochs_list]
-        else:
-            epochs_list = [int(epochs)]
-
-    # Expand matrix across epochs
-    final_matrix: List[Dict[str, Any]] = []
-    multi_epoch = len(epochs_list) > 1
-    for m in matrix:
-        for ep in epochs_list:
-            cfg = dict(m)
-            cfg["data_root"] = data_root
-            cfg["epochs"] = int(ep)
-            cfg["tag"] = m["tag"] + (f"_ep{ep}" if multi_epoch else "")
-            final_matrix.append(cfg)
-
     # Summary
-    k0_count = sum(1 for m in final_matrix if m.get("max_children", -1) == 0)
-    kpos_count = len(final_matrix) - k0_count
-    total_runs = len(final_matrix) * int(repeats)
+    k0_count = sum(1 for m in matrix if m.get("max_children", -1) == 0)
+    kpos_count = len(matrix) - k0_count
+    total_runs = len(matrix) * int(repeats)
     
-    print(f"[matrix] BoeNet v1.0.0 Language Model Training Matrix")
+    print(f"[matrix] BoeNet v2.0.0 Language Model Training Matrix")
     print(f"[matrix] Dataset: {dataset}")
-    print(f"[matrix] Planned cells: {len(final_matrix)} | repeats: {repeats} | total: {total_runs}")
+    print(f"[matrix] Planned cells: {len(matrix)} | repeats: {repeats} | total: {total_runs}")
     print(f"[matrix] K=0 (dense): {k0_count} | K>0 (BFS): {kpos_count}")
     print(f"[matrix] Lambda sweep: {lambda_efficiency_list}")
     print(f"[matrix] Threshold sweep: {greedy_threshold_list}")
@@ -1043,7 +1058,7 @@ def main():
 
     # Build run list
     all_runs: List[Tuple[Dict[str, Any], int]] = []
-    for base_cfg in final_matrix:
+    for base_cfg in matrix:
         for rep in range(int(repeats)):
             all_runs.append((base_cfg, rep))
 
@@ -1061,7 +1076,8 @@ def main():
         for base_cfg, rep in progress_iter:
             run_cfg = dict(base_cfg)
             run_cfg["seed"] = int(seed0) + rep
-            run_cfg["tag"] = f"{base_cfg['tag']}_rep{rep}"
+            tag_base = base_cfg['tag']
+            run_cfg["tag"] = f"{tag_base}_rep{rep}"
 
             run_dir = out_root / run_cfg["tag"]
             run_dir.mkdir(parents=True, exist_ok=True)

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-train_boenet.py (v1.0.0 - Language Model)
+train_boenet.py (v2.0.0 - Language Model)
 
-Train BoeNet on Shakespeare/TinyStories with REINFORCE Policy Gradients
+Train BoeNet on WikiText-2/Shakespeare/TinyStories with REINFORCE Policy Gradients
 
 Converted from train_fmnist_bfs.py (Vision) to train_boenet.py (Language)
 --------------------------------------------------------------------------
@@ -22,7 +22,7 @@ REMOVED:
   - Augmentation parameters (aug_pad, aug_hflip, no_normalize)
 
 ADDED:
-  - Shakespeare/TinyStories data loading (via HuggingFace datasets)
+  - WikiText-2/Shakespeare/TinyStories data loading
   - Perplexity metrics (exp(cross_entropy_loss))
   - Next-token prediction loss
   - Character tokenization
@@ -39,14 +39,21 @@ UNCHANGED:
   - Checkpoint saving
   - Node counting and sparsity metrics
 
-v1.0.0 Greedy Threshold (same as BFSNet v2.0.0)
+v2.0.0 Dataset Changes:
+-----------------------
+  - Default dataset changed from shakespeare to wikitext2
+  - WikiText-2 uses modern HuggingFace Parquet format (no script issues)
+  - Shakespeare now downloads directly from Karpathy's GitHub
+  - Added wikitext103, bookcorpus, openwebtext options
+
+v2.0.0 Greedy Threshold (same as BFSNet v2.0.0)
 -----------------------------------------------
 The greedy_threshold parameter controls inference sparsity:
   - threshold = 0.50 (default): Conservative, often root-only
   - threshold = 0.42-0.45: Balanced, partial expansion
   - threshold = 0.30-0.35: Aggressive, near-full expansion
 
-Training Loop (v1.0.0):
+Training Loop (v2.0.0):
   1. Forward: outputs, policy_loss, rewards, node_counts = model(x, labels=y, ...)
   2. Language modeling loss: CE(outputs, y) where y is shifted input
   3. Total loss: lm_loss + beta_policy * policy_loss
@@ -58,7 +65,7 @@ Metrics:
   - Lower perplexity = better model
   - Random baseline: PPL = vocab_size (256 for char-level)
 
-Node Counting Metrics (v1.0.0):
+Node Counting Metrics (v2.0.0):
   - node_counts: List[int] from model.forward(), one int per rollout
   - Each int is total nodes created for the ENTIRE BATCH in that rollout
   - For language models, this is across all token positions
@@ -66,7 +73,10 @@ Node Counting Metrics (v1.0.0):
 
 Usage Examples:
 ---------------
-# Basic training on Shakespeare:
+# Basic training on WikiText-2 (DEFAULT):
+python3 train_boenet.py --epochs 10 --dataset wikitext2
+
+# Training on Shakespeare (via GitHub download):
 python3 train_boenet.py --epochs 10 --dataset shakespeare
 
 # Training with custom hyperparameters:
@@ -84,12 +94,12 @@ python3 train_boenet.py \\
 python3 train_boenet.py --dataset tinystories --epochs 5
 
 # Training on custom text file:
-python3 train_boenet.py --dataset textfile --text_file path/to/text.txt
+python3 train_boenet.py --dataset textfile --text_filepath path/to/text.txt
 
 Greedy Threshold Selection Guide:
 ---------------------------------
 The greedy_threshold parameter controls which grow decisions pass during
-inference. This is CRITICAL for v1.0.0 models.
+inference. This is CRITICAL for v2.0.0 models.
 
 PROBLEM: Policy learns grow_prob ≈ 0.40-0.50 during training, but default
          threshold=0.5 blocks most decisions → root-only inference.
@@ -105,8 +115,18 @@ WORKFLOW:
   3. Note the mean_grow_prob from output
   4. Retrain with: --greedy_threshold <mean_grow_prob - 0.03>
 
+Available Datasets:
+-------------------
+  wikitext2:   ~2MB Wikipedia (DEFAULT, RECOMMENDED)
+  wikitext103: ~500MB Wikipedia
+  shakespeare: ~1MB literary text (via GitHub)
+  tinystories: ~2GB children's stories
+  bookcorpus:  ~5GB books
+  openwebtext: ~40GB web text
+  textfile:    Custom local text file
+
 Author: BoeNet project (converted from BFSNet)
-Version: 1.0.0
+Version: 2.0.0
 Date: 2025-12-22
 """
 
@@ -214,8 +234,8 @@ def _flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "save_path", "data_root", "cpu",
         "pooling_mode",
         # Language model specific
-        "vocab_size", "seq_len", "dataset", "stride", "text_file",
-        # v1.0.0 policy parameters
+        "vocab_size", "seq_len", "dataset", "stride", "text_filepath",
+        # v2.0.0 policy parameters
         "num_rollouts", "lambda_efficiency", "beta_entropy", "beta_policy",
         "greedy_threshold",
         # Pruning losses
@@ -236,7 +256,7 @@ def _flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "training": ["epochs", "lr", "weight_decay", "grad_clip", "seed"],
         "model": ["hidden_dim", "embed_dim", "max_depth", "max_children", 
                   "no_sibling_embed", "greedy_threshold", "vocab_size"],
-        "data": ["seq_len", "dataset", "stride", "batch_size", "val_ratio", "text_file"],
+        "data": ["seq_len", "dataset", "stride", "batch_size", "val_ratio", "text_filepath"],
         "pruning": ["use_pruning", "pruning_mode", "pruning_threshold"],
         "dataloader": ["num_workers", "pin_memory"],
         "save": ["save_path", "data_root"],
@@ -408,9 +428,9 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         "dataloader_pin_memory": args.pin_memory,
     }
     
-    # Add text_file if using textfile dataset
-    if args.dataset == "textfile" and args.text_file:
-        loader_kwargs["text_file"] = args.text_file
+    # Add text_filepath if using textfile dataset
+    if args.dataset == "textfile" and args.text_filepath:
+        loader_kwargs["text_filepath"] = args.text_filepath
     
     train_loader, val_loader, vocab_size = get_dataloaders(args.dataset, **loader_kwargs)
     
@@ -535,7 +555,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             
             optimizer.zero_grad()
             
-            # v1.0.0 FORWARD (Language Model)
+            # v2.0.0 FORWARD (Language Model)
             outputs, policy_loss, rewards, node_counts = model(
                 input_ids,
                 num_rollouts=args.num_rollouts,
@@ -646,7 +666,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     ckpt = {
         "model_state_dict": model.state_dict(),
         "config": {
-            # Language model specific (NEW keys for v1.0.0)
+            # Language model specific (NEW keys for v2.0.0)
             "vocab_size": vocab_size,
             "embed_dim": args.embed_dim,
             "hidden_dim": args.hidden_dim,
@@ -661,12 +681,12 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             "pruning_mode": args.pruning_mode,
             "pruning_threshold": args.pruning_threshold,
             "pooling_mode": args.pooling_mode,
-            # v1.0.0 policy parameters
+            # v2.0.0 policy parameters
             "num_rollouts": args.num_rollouts,
             "lambda_efficiency": args.lambda_efficiency,
             "beta_entropy": args.beta_entropy,
             "beta_policy": args.beta_policy,
-            "version": "1.0.0",
+            "version": "2.0.0",
             "model_type": "language",
         },
         "training_meta": {
@@ -795,11 +815,14 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Train BoeNet v1.0.0 Language Model with REINFORCE policy gradients",
+        description="Train BoeNet v2.0.0 Language Model with REINFORCE policy gradients",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
 ---------
+# Train on WikiText-2 (DEFAULT):
+python3 train_boenet.py --epochs 10 --dataset wikitext2
+
 # Train on Shakespeare:
 python3 train_boenet.py --epochs 10 --dataset shakespeare
 
@@ -807,7 +830,7 @@ python3 train_boenet.py --epochs 10 --dataset shakespeare
 python3 train_boenet.py --epochs 5 --dataset tinystories
 
 # Train on custom text file:
-python3 train_boenet.py --dataset textfile --text_file path/to/text.txt --epochs 10
+python3 train_boenet.py --dataset textfile --text_filepath path/to/text.txt --epochs 10
 
 # Custom hyperparameters:
 python3 train_boenet.py \\
@@ -820,10 +843,20 @@ python3 train_boenet.py \\
     --greedy_threshold 0.42 \\
     --epochs 20
 
+Available Datasets:
+-------------------
+  wikitext2:   ~2MB Wikipedia (DEFAULT, RECOMMENDED)
+  wikitext103: ~500MB Wikipedia
+  shakespeare: ~1MB literary text (via GitHub)
+  tinystories: ~2GB children's stories
+  bookcorpus:  ~5GB books
+  openwebtext: ~40GB web text
+  textfile:    Custom local text file
+
 Greedy Threshold Selection Guide:
 ---------------------------------
 The greedy_threshold parameter controls which grow decisions pass during
-inference. This is CRITICAL for v1.0.0 models.
+inference. This is CRITICAL for v2.0.0 models.
 
 PROBLEM: Policy learns grow_prob ≈ 0.40-0.50 during training, but default
          threshold=0.5 blocks most decisions → root-only inference.
@@ -848,10 +881,11 @@ See docs/architecture.md for detailed analysis.
                    help="Path to YAML config")
     
     # Data (Language Model Specific)
-    p.add_argument("--dataset", type=str, default="shakespeare",
-                   choices=["shakespeare", "tinystories", "textfile"],
-                   help="Dataset to use for training")
-    p.add_argument("--text_file", type=str, default=None,
+    p.add_argument("--dataset", type=str, default="wikitext2",
+                   choices=["wikitext2", "wikitext103", "shakespeare", "tinystories", 
+                            "bookcorpus", "openwebtext", "textfile"],
+                   help="Dataset to use for training (default: wikitext2)")
+    p.add_argument("--text_filepath", type=str, default=None,
                    help="Path to text file (for --dataset textfile)")
     p.add_argument("--data_root", type=str, default="./data",
                    help="Root directory for data caching")
@@ -892,7 +926,7 @@ See docs/architecture.md for detailed analysis.
     p.add_argument("--pruning_threshold", type=float, default=1e-3,
                    help="Pruning threshold")
     
-    # v1.0.0 Policy Gradient Parameters
+    # v2.0.0 Policy Gradient Parameters
     p.add_argument("--num_rollouts", type=int, default=3,
                    help="Number of rollouts per input for exploration (1-5)")
     p.add_argument("--lambda_efficiency", type=float, default=0.05,
@@ -957,7 +991,7 @@ See docs/architecture.md for detailed analysis.
                    help="Random seed")
     p.add_argument("--cpu", type=str2bool, nargs="?", const=True, default=False,
                    help="Force CPU training")
-    p.add_argument("--save_path", type=str, default="checkpoints/boenet_shakespeare.pt",
+    p.add_argument("--save_path", type=str, default="checkpoints/boenet_wikitext2.pt",
                    help="Path to save checkpoint")
     
     # Debug

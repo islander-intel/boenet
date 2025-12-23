@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-boenet/utils/data_utils.py (v1.0.0 - Language Model Support)
+boenet/utils/data_utils.py (v2.0.0 - Redesigned Language Model Support)
 
 Lightweight dataset + dataloader utilities for BoeNet experiments.
 
@@ -15,21 +15,29 @@ Vision (unchanged from BFSNet):
   - FashionMNIST: Fashion items
   - Synthetic Text BoW: Bag-of-words classification
 
-Language (NEW for BoeNet):
-  - Shakespeare (char-level): karpathy/tiny_shakespeare
-  - TinyStories (char/BPE): roneneldan/TinyStories
+Language (REDESIGNED in v2.0.0):
+  - WikiText-2: Small Wikipedia dataset (~2MB) - DEFAULT
+  - WikiText-103: Large Wikipedia dataset (~500MB)
+  - Shakespeare: Karpathy's tiny_shakespeare via direct GitHub download
+  - TinyStories: Children's stories from HuggingFace
+  - BookCorpus: 11,000 books (large, ~5GB)
+  - Custom text files: Any local .txt file
 
-What's included
----------------
-1) set_seed(seed): Deterministic seeding
-2) get_device(force_cpu=False): Choose device
-3) Vision datasets (unchanged):
-   - Toy2Token, MNIST, FashionMNIST, Synthetic Text BoW
-4) Language datasets (NEW):
-   - TextDataset: Generic text dataset for language modeling
-   - build_shakespeare_datasets: Character-level Shakespeare
-   - build_tinystories_datasets: TinyStories (larger scale)
-5) get_dataloaders(): Unified entry point supporting all datasets
+Design Changes in v2.0.0
+------------------------
+1. RENAMED: build_shakespeare_datasets() → load_shakespeare_from_github()
+   - Now downloads directly from GitHub, bypassing broken HuggingFace dataset
+   
+2. NEW: load_huggingface_text_dataset(dataset_name, ...)
+   - Generic function for ANY HuggingFace text dataset
+   - Properly named to describe what it does
+   
+3. NEW: WikiText-2 as default dataset
+   - Well-maintained, modern Parquet format
+   - Small enough for quick experiments (~2MB)
+   
+4. REMOVED: Hardcoded build_tinystories_datasets()
+   - Now uses generic load_huggingface_text_dataset()
 
 Language Model Data Format
 --------------------------
@@ -51,13 +59,20 @@ and pass them to TextDataset.
 
 Usage Examples
 --------------
->>> # Character-level Shakespeare
+>>> # WikiText-2 (default, recommended)
+>>> train_loader, val_loader, vocab_size = get_dataloaders(
+...     "wikitext2",
+...     batch_size=64,
+...     seq_len=128,
+... )
+>>> 
+>>> # Shakespeare (via GitHub download)
 >>> train_loader, val_loader, vocab_size = get_dataloaders(
 ...     "shakespeare",
 ...     batch_size=64,
 ...     seq_len=128,
 ... )
->>> 
+>>>
 >>> # FashionMNIST (unchanged API)
 >>> train_loader, val_loader, input_dim, num_classes = get_dataloaders(
 ...     "fashionmnist",
@@ -65,14 +80,36 @@ Usage Examples
 ...     mnist_flatten=True,
 ... )
 
+Changelog
+---------
+v2.0.0 (2025-12-22):
+  - MAJOR REDESIGN: Generic HuggingFace loader
+  - NEW: load_huggingface_text_dataset() - generic function for all HF datasets
+  - NEW: load_shakespeare_from_github() - direct download bypassing broken HF dataset
+  - NEW: WikiText-2 as default dataset (modern Parquet format, no script issues)
+  - REMOVED: build_shakespeare_datasets() (used broken HF dataset script)
+  - REMOVED: build_tinystories_datasets() (replaced by generic loader)
+  - FIXED: "Dataset scripts are no longer supported" error
+
+v1.0.1 (2025-12-22):
+  - BUGFIX: Removed deprecated trust_remote_code=True from load_dataset() calls
+
+v1.0.0 (2025-12-22):
+  - Initial language model support
+  - Added TextDataset, CharTokenizer
+  - Added Shakespeare and TinyStories datasets
+
 Author: BoeNet project (extended from BFSNet)
-Version: 1.0.0
+Version: 2.0.0
 Date: 2025-12-22
 """
 
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Literal, Optional, Tuple, List, Union
+import os
+import urllib.request
+import hashlib
 
 import torch
 from torch import nn
@@ -332,7 +369,7 @@ class CharTokenizer:
 
 
 # --------------------------------------------------------------------------- #
-#                           Text Dataset (NEW)                                #
+#                           Text Dataset                                      #
 # --------------------------------------------------------------------------- #
 
 class TextDataset(Dataset):
@@ -429,33 +466,65 @@ class TextDataset(Dataset):
 
 
 # --------------------------------------------------------------------------- #
-#                         Shakespeare Dataset (NEW)                           #
+#                    Shakespeare Dataset (Direct GitHub Download)             #
 # --------------------------------------------------------------------------- #
 
-def _assert_datasets() -> None:
-    """Raise ImportError if HuggingFace datasets not available."""
-    if not _HAS_DATASETS:
-        raise ImportError(
-            "HuggingFace datasets library not available. Install with:\n"
-            "  pip install datasets\n"
-            "Or use local text files with TextDataset directly."
-        )
+# Karpathy's tiny_shakespeare raw text URL
+SHAKESPEARE_URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+SHAKESPEARE_MD5 = "d0d0c12375f25a2a2c95752c04f62c7d"  # MD5 hash for validation
 
 
-def build_shakespeare_datasets(
+def _download_file(url: str, filepath: str, expected_md5: Optional[str] = None) -> None:
+    """
+    Download a file from URL to local path with optional MD5 validation.
+    
+    Parameters
+    ----------
+    url : str
+        URL to download from.
+    filepath : str
+        Local path to save file.
+    expected_md5 : str, optional
+        Expected MD5 hash for validation.
+    """
+    print(f"[data] Downloading from {url}...")
+    
+    # Create directory if needed
+    os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else ".", exist_ok=True)
+    
+    # Download
+    urllib.request.urlretrieve(url, filepath)
+    
+    # Validate MD5 if provided
+    if expected_md5:
+        with open(filepath, "rb") as f:
+            actual_md5 = hashlib.md5(f.read()).hexdigest()
+        if actual_md5 != expected_md5:
+            os.remove(filepath)
+            raise ValueError(
+                f"MD5 mismatch: expected {expected_md5}, got {actual_md5}. "
+                f"File may be corrupted or changed."
+            )
+    
+    print(f"[data] Downloaded to {filepath}")
+
+
+def load_shakespeare_from_github(
     seq_len: int = 128,
     seed: int = 42,
     split: SplitConfig = SplitConfig(val_ratio=0.1),
     batch_size: int = 64,
     stride: Optional[int] = None,
+    cache_dir: str = "./data",
     *,
     num_workers: int = 0,
     pin_memory: bool = False,
 ) -> Tuple[DataLoader, DataLoader, int]:
     """
-    Build dataloaders for character-level Shakespeare language modeling.
+    Load Shakespeare dataset via direct GitHub download.
     
-    Uses the karpathy/tiny_shakespeare dataset from HuggingFace.
+    This function downloads Karpathy's tiny_shakespeare directly from GitHub,
+    bypassing HuggingFace which has broken dataset script support.
     
     Parameters
     ----------
@@ -469,6 +538,8 @@ def build_shakespeare_datasets(
         Batch size.
     stride : int, optional
         Stride between samples. Defaults to seq_len (non-overlapping).
+    cache_dir : str, default="./data"
+        Directory to cache downloaded file.
     num_workers : int, default=0
         Number of dataloader workers.
     pin_memory : bool, default=False
@@ -481,32 +552,35 @@ def build_shakespeare_datasets(
         
     Examples
     --------
-    >>> train_loader, val_loader, vocab_size = build_shakespeare_datasets(
+    >>> train_loader, val_loader, vocab_size = load_shakespeare_from_github(
     ...     seq_len=128, batch_size=64
     ... )
     >>> for input_ids, labels in train_loader:
     ...     # input_ids: [B, seq_len]
     ...     # labels: [B, seq_len]
     ...     break
+    
+    Notes
+    -----
+    The Shakespeare text is ~1.1MB and contains the complete works of Shakespeare.
+    This is the same dataset used in Karpathy's char-rnn and nanoGPT projects.
     """
-    _assert_datasets()
     set_seed(seed)
     
-    # Load dataset from HuggingFace
-    print("[data] Loading karpathy/tiny_shakespeare from HuggingFace...")
-    dataset = load_dataset("karpathy/tiny_shakespeare", trust_remote_code=True)
+    # Check for cached file
+    filepath = os.path.join(cache_dir, "shakespeare", "input.txt")
     
-    # Concatenate all text (train split contains full text)
-    if "train" in dataset:
-        text = dataset["train"]["text"][0]
+    if os.path.exists(filepath):
+        print(f"[data] Using cached Shakespeare: {filepath}")
     else:
-        # Fallback: concatenate all splits
-        text = ""
-        for split_name in dataset.keys():
-            for item in dataset[split_name]:
-                text += item["text"]
+        print("[data] Downloading Shakespeare from GitHub (Karpathy's char-rnn)...")
+        _download_file(SHAKESPEARE_URL, filepath, expected_md5=SHAKESPEARE_MD5)
     
-    print(f"[data] Loaded {len(text):,} characters")
+    # Load text
+    with open(filepath, "r", encoding="utf-8") as f:
+        text = f.read()
+    
+    print(f"[data] Loaded {len(text):,} characters from Shakespeare")
     
     # Create tokenizer
     tokenizer = CharTokenizer()
@@ -547,26 +621,74 @@ def build_shakespeare_datasets(
     return train_loader, val_loader, tokenizer.vocab_size
 
 
-def build_tinystories_datasets(
-    seq_len: int = 256,
+# --------------------------------------------------------------------------- #
+#                  Generic HuggingFace Text Dataset Loader                    #
+# --------------------------------------------------------------------------- #
+
+# Supported HuggingFace datasets with their configurations
+# Format: {user_name: (hf_dataset_name, hf_config_name, text_column, description)}
+HUGGINGFACE_DATASETS = {
+    # WikiText - well-maintained, modern Parquet format
+    "wikitext2": ("wikitext", "wikitext-2-raw-v1", "text", "Small Wikipedia (~2MB)"),
+    "wikitext103": ("wikitext", "wikitext-103-raw-v1", "text", "Large Wikipedia (~500MB)"),
+    
+    # TinyStories - children's stories
+    "tinystories": ("roneneldan/TinyStories", None, "text", "Children's stories (~2GB)"),
+    
+    # BookCorpus - 11,000 books
+    "bookcorpus": ("bookcorpus", None, "text", "11,000 books (~5GB)"),
+    
+    # OpenWebText - GPT-2 training data
+    "openwebtext": ("openwebtext", None, "text", "Web text (~40GB)"),
+    
+    # AG News - news classification (for testing)
+    "agnews": ("ag_news", None, "text", "News articles (~30MB)"),
+}
+
+
+def _assert_datasets() -> None:
+    """Raise ImportError if HuggingFace datasets not available."""
+    if not _HAS_DATASETS:
+        raise ImportError(
+            "HuggingFace datasets library not available. Install with:\n"
+            "  pip install datasets\n"
+            "Or use local text files with load_text_file() or Shakespeare with "
+            "load_shakespeare_from_github() (no datasets library required)."
+        )
+
+
+def load_huggingface_text_dataset(
+    dataset_name: str,
+    seq_len: int = 128,
     seed: int = 42,
     split: SplitConfig = SplitConfig(val_ratio=0.1),
     batch_size: int = 64,
     stride: Optional[int] = None,
     max_samples: Optional[int] = None,
+    hf_split: str = "train",
     *,
     num_workers: int = 0,
     pin_memory: bool = False,
 ) -> Tuple[DataLoader, DataLoader, int]:
     """
-    Build dataloaders for character-level TinyStories language modeling.
+    Load any HuggingFace text dataset for character-level language modeling.
     
-    Uses the roneneldan/TinyStories dataset from HuggingFace.
-    This is a larger dataset (~2GB) suitable for scaling experiments.
+    This is a GENERIC function that can load any text dataset from HuggingFace.
+    It handles the common pattern of:
+      1. Load dataset from HuggingFace Hub
+      2. Extract text from specified column
+      3. Concatenate all text
+      4. Create TextDataset with tokenization
+      5. Split into train/val
+      6. Create dataloaders
     
     Parameters
     ----------
-    seq_len : int, default=256
+    dataset_name : str
+        Dataset name. Can be:
+        - Shorthand: "wikitext2", "wikitext103", "tinystories", "bookcorpus"
+        - Full HuggingFace path: "username/dataset_name"
+    seq_len : int, default=128
         Sequence length for each sample.
     seed : int, default=42
         Random seed for reproducibility.
@@ -577,8 +699,10 @@ def build_tinystories_datasets(
     stride : int, optional
         Stride between samples. Defaults to seq_len (non-overlapping).
     max_samples : int, optional
-        Maximum number of stories to use (for memory/speed limits).
-        If None, use all available stories.
+        Maximum number of text samples to load (for memory/speed limits).
+        If None, use all available samples.
+    hf_split : str, default="train"
+        Which HuggingFace split to use (usually "train").
     num_workers : int, default=0
         Number of dataloader workers.
     pin_memory : bool, default=False
@@ -588,27 +712,84 @@ def build_tinystories_datasets(
     -------
     Tuple[DataLoader, DataLoader, int]
         (train_loader, val_loader, vocab_size)
+        
+    Examples
+    --------
+    >>> # WikiText-2 (recommended for quick experiments)
+    >>> train, val, vocab = load_huggingface_text_dataset("wikitext2", seq_len=128)
+    
+    >>> # TinyStories with max samples limit
+    >>> train, val, vocab = load_huggingface_text_dataset(
+    ...     "tinystories", seq_len=256, max_samples=10000
+    ... )
+    
+    >>> # Custom HuggingFace dataset
+    >>> train, val, vocab = load_huggingface_text_dataset(
+    ...     "username/my_dataset", seq_len=128
+    ... )
+    
+    Supported Datasets
+    ------------------
+    - wikitext2: Small Wikipedia (~2MB) - RECOMMENDED for quick experiments
+    - wikitext103: Large Wikipedia (~500MB)
+    - tinystories: Children's stories (~2GB)
+    - bookcorpus: 11,000 books (~5GB)
+    - openwebtext: Web text (~40GB)
+    - Any other HuggingFace dataset with a "text" column
     """
     _assert_datasets()
     set_seed(seed)
     
-    # Load dataset from HuggingFace
-    print("[data] Loading roneneldan/TinyStories from HuggingFace...")
-    print("[data] (This may take a while for the first download)")
-    dataset = load_dataset("roneneldan/TinyStories", trust_remote_code=True)
+    # Resolve dataset configuration
+    dataset_name_lower = dataset_name.lower().strip()
     
-    # Concatenate stories
-    print("[data] Concatenating stories...")
+    if dataset_name_lower in HUGGINGFACE_DATASETS:
+        hf_name, hf_config, text_column, description = HUGGINGFACE_DATASETS[dataset_name_lower]
+        print(f"[data] Loading {dataset_name_lower}: {description}")
+    else:
+        # Assume it's a full HuggingFace path
+        hf_name = dataset_name
+        hf_config = None
+        text_column = "text"
+        print(f"[data] Loading custom HuggingFace dataset: {hf_name}")
+    
+    # Load from HuggingFace
+    print(f"[data] Downloading from HuggingFace Hub...")
+    if hf_config:
+        dataset = load_dataset(hf_name, hf_config)
+    else:
+        dataset = load_dataset(hf_name)
+    
+    # Get the specified split
+    if hf_split not in dataset:
+        available = list(dataset.keys())
+        print(f"[data] Split '{hf_split}' not found, using '{available[0]}'")
+        hf_split = available[0]
+    
+    data_split = dataset[hf_split]
+    
+    # Extract and concatenate text
+    print(f"[data] Extracting text from '{text_column}' column...")
     texts = []
     count = 0
-    for item in dataset["train"]:
-        texts.append(item["text"])
-        count += 1
-        if max_samples is not None and count >= max_samples:
-            break
     
+    for item in data_split:
+        text_value = item.get(text_column, "")
+        if text_value:  # Skip empty texts
+            texts.append(text_value)
+            count += 1
+            if max_samples is not None and count >= max_samples:
+                break
+    
+    if not texts:
+        raise ValueError(
+            f"No text found in column '{text_column}'. "
+            f"Available columns: {list(data_split[0].keys())}"
+        )
+    
+    # Concatenate all text
     text = "\n\n".join(texts)
-    print(f"[data] Loaded {count:,} stories, {len(text):,} characters")
+    print(f"[data] Loaded {count:,} text samples, {len(text):,} characters total")
     
     # Create tokenizer
     tokenizer = CharTokenizer()
@@ -621,7 +802,7 @@ def build_tinystories_datasets(
         stride=stride,
     )
     
-    print(f"[data] Created {len(full_dataset):,} samples (seq_len={seq_len})")
+    print(f"[data] Created {len(full_dataset):,} training samples (seq_len={seq_len})")
     
     # Split into train/val
     train_ds, val_ds = split_dataset(full_dataset, split=split, seed=seed)
@@ -641,15 +822,19 @@ def build_tinystories_datasets(
     # Sanity check
     input_ids, labels = next(iter(train_loader))
     _print_sanity_text_once(
-        "tinystories", input_ids, labels,
+        f"hf:{dataset_name_lower}", input_ids, labels,
         vocab_size=tokenizer.vocab_size,
-        dataset_name="tinystories"
+        dataset_name=dataset_name_lower
     )
     
     return train_loader, val_loader, tokenizer.vocab_size
 
 
-def build_text_file_datasets(
+# --------------------------------------------------------------------------- #
+#                         Local Text File Loader                              #
+# --------------------------------------------------------------------------- #
+
+def load_text_file(
     filepath: str,
     seq_len: int = 128,
     seed: int = 42,
@@ -662,7 +847,7 @@ def build_text_file_datasets(
     pin_memory: bool = False,
 ) -> Tuple[DataLoader, DataLoader, int]:
     """
-    Build dataloaders from a local text file.
+    Load dataloaders from a local text file.
     
     Parameters
     ----------
@@ -732,7 +917,7 @@ def build_text_file_datasets(
     _print_sanity_text_once(
         f"textfile:{filepath}", input_ids, labels,
         vocab_size=tokenizer.vocab_size,
-        dataset_name=f"textfile"
+        dataset_name="textfile"
     )
     
     return train_loader, val_loader, tokenizer.vocab_size
@@ -960,14 +1145,23 @@ def build_synthetic_text_bow(
 #                           Unified Accessor Function                          #
 # --------------------------------------------------------------------------- #
 
+# Available language datasets
+LANGUAGE_DATASETS = [
+    "wikitext2",      # Small Wikipedia (DEFAULT, ~2MB)
+    "wikitext103",    # Large Wikipedia (~500MB)
+    "shakespeare",    # Karpathy's tiny_shakespeare via GitHub (~1MB)
+    "tinystories",    # Children's stories (~2GB)
+    "bookcorpus",     # 11,000 books (~5GB)
+    "openwebtext",    # Web text (~40GB)
+    "textfile",       # Local text file
+]
+
+
 def get_dataloaders(
-    name: Literal[
-        "toy", "mnist", "fashionmnist", "text_bow",
-        "shakespeare", "tinystories", "textfile"
-    ] = "toy",
+    name: str = "wikitext2",
     *,
     # Common
-    batch_size: int = 16,
+    batch_size: int = 64,
     seed: int = 42,
     split: SplitConfig = SplitConfig(),
     dataloader_num_workers: int = 0,
@@ -990,11 +1184,12 @@ def get_dataloaders(
     text_samples_per_class: int = 200,
     text_class_bias: float = 0.2,
     text_avg_len: int = 16,
-    # Language Model (NEW)
+    # Language Model
     seq_len: int = 128,
     stride: Optional[int] = None,
     text_filepath: Optional[str] = None,
-    tinystories_max_samples: Optional[int] = None,
+    max_samples: Optional[int] = None,
+    cache_dir: str = "./data",
 ) -> Union[
     Tuple[DataLoader, DataLoader, int, int],  # Vision: (train, val, input_dim, num_classes)
     Tuple[DataLoader, DataLoader, int],       # Language: (train, val, vocab_size)
@@ -1004,16 +1199,40 @@ def get_dataloaders(
     
     Parameters
     ----------
-    name : str
+    name : str, default="wikitext2"
         Dataset name. Options:
-        - Vision: "toy", "mnist", "fashionmnist", "text_bow"
-        - Language: "shakespeare", "tinystories", "textfile"
-    batch_size : int
+        
+        Vision datasets (return 4-tuple):
+        - "toy": Two-class toy vectors
+        - "mnist": Handwritten digits
+        - "fashionmnist": Fashion items
+        - "text_bow": Synthetic bag-of-words
+        
+        Language datasets (return 3-tuple):
+        - "wikitext2": Small Wikipedia (~2MB) - DEFAULT, RECOMMENDED
+        - "wikitext103": Large Wikipedia (~500MB)
+        - "shakespeare": Karpathy's tiny_shakespeare (~1MB, via GitHub)
+        - "tinystories": Children's stories (~2GB)
+        - "bookcorpus": 11,000 books (~5GB)
+        - "openwebtext": Web text (~40GB)
+        - "textfile": Local text file (requires text_filepath)
+        
+    batch_size : int, default=64
         Batch size.
-    seed : int
+    seed : int, default=42
         Random seed.
     split : SplitConfig
         Train/val split configuration.
+    seq_len : int, default=128
+        Sequence length for language models.
+    stride : int, optional
+        Stride between samples for language models.
+    text_filepath : str, optional
+        Path to local text file (required for "textfile" dataset).
+    max_samples : int, optional
+        Maximum samples to load (for large datasets).
+    cache_dir : str, default="./data"
+        Directory for caching downloaded files.
     
     Returns
     -------
@@ -1024,15 +1243,23 @@ def get_dataloaders(
         
     Examples
     --------
-    >>> # Vision (4-tuple return)
-    >>> train, val, D, C = get_dataloaders("fashionmnist", batch_size=64)
-    >>> 
-    >>> # Language (3-tuple return)
+    >>> # WikiText-2 (default, recommended for quick experiments)
+    >>> train, val, vocab = get_dataloaders("wikitext2", batch_size=64, seq_len=128)
+    
+    >>> # Shakespeare (via GitHub, no HuggingFace needed)
     >>> train, val, vocab = get_dataloaders("shakespeare", batch_size=64, seq_len=128)
+    
+    >>> # FashionMNIST (vision, unchanged API)
+    >>> train, val, D, C = get_dataloaders("fashionmnist", batch_size=64)
+    
+    >>> # Local text file
+    >>> train, val, vocab = get_dataloaders("textfile", text_filepath="my_book.txt")
     """
     name = name.lower().strip()
 
+    # -------------------------------------------------------------------------
     # Vision datasets (return 4-tuple)
+    # -------------------------------------------------------------------------
     if name == "toy":
         return build_toy2token_dataset(
             samples_per_class=toy_samples_per_class,
@@ -1093,34 +1320,31 @@ def get_dataloaders(
             pin_memory=dataloader_pin_memory,
         )
 
+    # -------------------------------------------------------------------------
     # Language datasets (return 3-tuple)
+    # -------------------------------------------------------------------------
+    
+    # Shakespeare: Direct GitHub download (bypasses broken HuggingFace dataset)
     if name == "shakespeare":
-        return build_shakespeare_datasets(
+        return load_shakespeare_from_github(
             seq_len=seq_len,
             seed=seed,
             split=split,
             batch_size=batch_size,
             stride=stride,
+            cache_dir=cache_dir,
             num_workers=dataloader_num_workers,
             pin_memory=dataloader_pin_memory,
         )
-
-    if name == "tinystories":
-        return build_tinystories_datasets(
-            seq_len=seq_len,
-            seed=seed,
-            split=split,
-            batch_size=batch_size,
-            stride=stride,
-            max_samples=tinystories_max_samples,
-            num_workers=dataloader_num_workers,
-            pin_memory=dataloader_pin_memory,
-        )
-
+    
+    # Local text file
     if name == "textfile":
         if text_filepath is None:
-            raise ValueError("text_filepath required for 'textfile' dataset")
-        return build_text_file_datasets(
+            raise ValueError(
+                "text_filepath required for 'textfile' dataset. "
+                "Example: get_dataloaders('textfile', text_filepath='my_book.txt')"
+            )
+        return load_text_file(
             filepath=text_filepath,
             seq_len=seq_len,
             seed=seed,
@@ -1130,11 +1354,28 @@ def get_dataloaders(
             num_workers=dataloader_num_workers,
             pin_memory=dataloader_pin_memory,
         )
+    
+    # HuggingFace datasets: wikitext2, wikitext103, tinystories, bookcorpus, openwebtext
+    if name in HUGGINGFACE_DATASETS or "/" in name:
+        return load_huggingface_text_dataset(
+            dataset_name=name,
+            seq_len=seq_len,
+            seed=seed,
+            split=split,
+            batch_size=batch_size,
+            stride=stride,
+            max_samples=max_samples,
+            num_workers=dataloader_num_workers,
+            pin_memory=dataloader_pin_memory,
+        )
 
+    # Unknown dataset
+    all_datasets = ["toy", "mnist", "fashionmnist", "text_bow"] + LANGUAGE_DATASETS
     raise ValueError(
-        f"Unknown dataset name '{name}'. Use one of: "
-        "'toy', 'mnist', 'fashionmnist', 'text_bow', "
-        "'shakespeare', 'tinystories', 'textfile'"
+        f"Unknown dataset name '{name}'. Available options:\n"
+        f"  Vision: toy, mnist, fashionmnist, text_bow\n"
+        f"  Language: {', '.join(LANGUAGE_DATASETS)}\n"
+        f"  Custom HuggingFace: 'username/dataset_name'"
     )
 
 
@@ -1154,7 +1395,7 @@ if __name__ == "__main__":
     set_seed(42)
     
     logger.info("=" * 60)
-    logger.info("BoeNet Data Utils v1.0.0 Self-Test Suite")
+    logger.info("BoeNet Data Utils v2.0.0 Self-Test Suite")
     logger.info("=" * 60)
     
     # Test 1: CharTokenizer
@@ -1192,42 +1433,87 @@ if __name__ == "__main__":
     logger.info(f"  D={D}, C={C}, batch={xb.shape}")
     logger.info("  ✓ Toy dataset OK")
     
-    # Test 4: Shakespeare dataset (if available)
+    # Test 4: Shakespeare dataset (via GitHub)
+    logger.info("\n[Test 4] Shakespeare dataset (via GitHub download)")
+    try:
+        train, val, vocab = load_shakespeare_from_github(
+            seq_len=64, batch_size=8, split=SplitConfig(val_ratio=0.1),
+            cache_dir="./data"
+        )
+        input_ids, labels = next(iter(train))
+        assert input_ids.shape == (8, 64), f"Expected (8, 64), got {input_ids.shape}"
+        assert labels.shape == (8, 64), f"Expected (8, 64), got {labels.shape}"
+        logger.info(f"  vocab_size={vocab}, batch={input_ids.shape}")
+        logger.info("  ✓ Shakespeare dataset OK")
+    except Exception as e:
+        logger.warning(f"  ⚠ Shakespeare test failed: {e}")
+    
+    # Test 5: WikiText-2 (if datasets library available)
     if _HAS_DATASETS:
-        logger.info("\n[Test 4] Shakespeare dataset (language)")
+        logger.info("\n[Test 5] WikiText-2 dataset (via HuggingFace)")
         try:
-            train, val, vocab = build_shakespeare_datasets(
-                seq_len=64, batch_size=8, split=SplitConfig(val_ratio=0.1)
+            train, val, vocab = load_huggingface_text_dataset(
+                "wikitext2", seq_len=64, batch_size=8, 
+                split=SplitConfig(val_ratio=0.1),
+                max_samples=100  # Limit for faster testing
             )
             input_ids, labels = next(iter(train))
-            assert input_ids.shape == (8, 64), f"Expected (8, 64), got {input_ids.shape}"
-            assert labels.shape == (8, 64), f"Expected (8, 64), got {labels.shape}"
+            assert input_ids.shape[1] == 64, f"Expected seq_len=64, got {input_ids.shape[1]}"
             logger.info(f"  vocab_size={vocab}, batch={input_ids.shape}")
-            logger.info("  ✓ Shakespeare dataset OK")
+            logger.info("  ✓ WikiText-2 dataset OK")
         except Exception as e:
-            logger.warning(f"  ⚠ Shakespeare test skipped: {e}")
+            logger.warning(f"  ⚠ WikiText-2 test failed: {e}")
     else:
-        logger.info("\n[Test 4] Shakespeare dataset (SKIPPED - datasets not installed)")
+        logger.info("\n[Test 5] WikiText-2 dataset (SKIPPED - datasets not installed)")
     
-    # Test 5: Unified accessor
-    logger.info("\n[Test 5] Unified accessor (get_dataloaders)")
+    # Test 6: Unified accessor
+    logger.info("\n[Test 6] Unified accessor (get_dataloaders)")
     
     # Vision dataset
     train, val, D, C = get_dataloaders("toy", batch_size=4, toy_samples_per_class=10)
     assert isinstance(D, int) and isinstance(C, int)
     logger.info(f"  toy: D={D}, C={C}")
     
-    # Language dataset (if available)
+    # Shakespeare (should work without datasets library)
+    try:
+        train, val, vocab = get_dataloaders("shakespeare", batch_size=8, seq_len=64)
+        assert isinstance(vocab, int)
+        logger.info(f"  shakespeare: vocab_size={vocab}")
+    except Exception as e:
+        logger.warning(f"  ⚠ shakespeare accessor failed: {e}")
+    
+    # WikiText-2 (requires datasets library)
     if _HAS_DATASETS:
         try:
-            train, val, vocab = get_dataloaders("shakespeare", batch_size=8, seq_len=64)
+            train, val, vocab = get_dataloaders(
+                "wikitext2", batch_size=8, seq_len=64, max_samples=100
+            )
             assert isinstance(vocab, int)
-            logger.info(f"  shakespeare: vocab_size={vocab}")
+            logger.info(f"  wikitext2: vocab_size={vocab}")
         except Exception as e:
-            logger.warning(f"  ⚠ shakespeare accessor skipped: {e}")
+            logger.warning(f"  ⚠ wikitext2 accessor failed: {e}")
     
     logger.info("  ✓ Unified accessor OK")
     
     logger.info("\n" + "=" * 60)
     logger.info("All self-tests passed!")
+    logger.info("=" * 60)
+    
+    # Print available datasets
+    logger.info("\n" + "=" * 60)
+    logger.info("Available Datasets:")
+    logger.info("=" * 60)
+    logger.info("\nVision (return 4-tuple: train, val, input_dim, num_classes):")
+    logger.info("  - toy: Two-class toy vectors")
+    logger.info("  - mnist: Handwritten digits")
+    logger.info("  - fashionmnist: Fashion items")
+    logger.info("  - text_bow: Synthetic bag-of-words")
+    logger.info("\nLanguage (return 3-tuple: train, val, vocab_size):")
+    logger.info("  - wikitext2: Small Wikipedia (~2MB) - DEFAULT, RECOMMENDED")
+    logger.info("  - wikitext103: Large Wikipedia (~500MB)")
+    logger.info("  - shakespeare: Karpathy's tiny_shakespeare (~1MB, via GitHub)")
+    logger.info("  - tinystories: Children's stories (~2GB)")
+    logger.info("  - bookcorpus: 11,000 books (~5GB)")
+    logger.info("  - openwebtext: Web text (~40GB)")
+    logger.info("  - textfile: Local text file (requires text_filepath)")
     logger.info("=" * 60)

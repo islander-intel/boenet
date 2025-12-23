@@ -1,0 +1,146 @@
+[sanity:fashionmnist] batch=64x784 dtype=float32 xmin=-0.424 xmax=2.821 y[min,max]=[0,9] label_counts_head=(0:11, 1:5, 2:4, 3:3, 4:3), assert_flatten=OK
+BFSNet v2.0.0 (
+  input_dim=784, hidden_dim=64, output_dim=10,
+  max_depth=2, max_children=3,
+  greedy_threshold=0.4000,
+  sibling_embed=True, sibling_scale=0.1250,
+  use_pruning=False, pruning_mode='learned',
+  pooling_mode='mean'
+)
+[dims] FashionMNIST: input_dim=784, num_classes=10
+[run] epochs=10 | batch_size=64 | lr=0.001 | wd=0.0 | grad_clip=1.0
+      policy: num_rollouts=3, λ_eff=0.01, β_ent=0.01, β_policy=0.5
+      greedy_threshold=0.4 (inference)
+      pooling_mode=mean
+      pruning losses: L1*=0.0, KL*=0.0 (keep_rate=0.5)
+[node metrics] Theoretical max nodes per example per rollout: 13
+               With 3 rollouts: 39 total
+               Batch-level max (B=64): 832 per rollout
+[opt] adamw | lr=0.001 | wd=0.0
+[lr] schedule=cosine
+
+[epoch 1/10] lr=0.001000
+[probe e=1 b=0] loss=0.820925
+  logits: mean=0.0625 std=0.1683 min=-0.7453 max=0.6447
+  root_fc.weight: grad_norm=1.022448e+00
+  output_fc.weight: grad_norm=2.599985e-01
+  ||root_fc||_2=7.311425e-01
+  ||output_fc||_2=7.463145e-01
+[probe e=1 b=1] loss=0.801156
+  logits: mean=0.0493 std=0.2305 min=-0.8499 max=1.7404
+  root_fc.weight: grad_norm=6.436670e-01
+  output_fc.weight: grad_norm=2.582120e-01
+  ||root_fc||_2=7.321165e-01
+  ||output_fc||_2=7.448350e-01
+  Train Loss: -1.1140 (cls=0.5426, policy=-3.3132) | Val Loss: 0.4385
+  Train Acc: 80.86% | Val Acc: 83.62% | Avg Total Nodes/Example: 14.25
+  (Sparsity: 36.53% of theoretical max 39 nodes)
+
+[epoch 2/10] lr=0.000976
+[probe e=2 b=0] loss=-0.891837
+  logits: mean=-1.5641 std=4.2712 min=-10.8536 max=11.9209
+  root_fc.weight: grad_norm=5.572797e-01
+  output_fc.weight: grad_norm=1.076263e+00
+  ||root_fc||_2=3.092632e+00
+  ||output_fc||_2=1.295837e+00
+[probe e=2 b=1] loss=-1.004613
+  logits: mean=-1.4639 std=4.0653 min=-11.1240 max=12.9668
+  root_fc.weight: grad_norm=5.574527e-01
+  output_fc.weight: grad_norm=9.787583e-01
+  ||root_fc||_2=3.100897e+00
+  ||output_fc||_2=1.296503e+00
+  Train Loss: -1.2895 (cls=0.3786, policy=-3.3362) | Val Loss: 0.3871
+  Train Acc: 86.13% | Val Acc: 85.85% | Avg Total Nodes/Example: 14.24
+  (Sparsity: 36.52% of theoretical max 39 nodes)
+
+[epoch 3/10] lr=0.000905
+  Train Loss: -1.3163 (cls=0.3376, policy=-3.3078) | Val Loss: 0.3626
+  Train Acc: 87.54% | Val Acc: 86.82% | Avg Total Nodes/Example: 14.21
+  (Sparsity: 36.44% of theoretical max 39 nodes)
+
+[epoch 4/10] lr=0.000794
+  Train Loss: -1.3572 (cls=0.3082, policy=-3.3308) | Val Loss: 0.3519
+  Train Acc: 88.52% | Val Acc: 86.93% | Avg Total Nodes/Example: 14.30
+  (Sparsity: 36.66% of theoretical max 39 nodes)
+
+[epoch 5/10] lr=0.000655
+  Train Loss: -1.3728 (cls=0.2861, policy=-3.3178) | Val Loss: 0.3302
+  Train Acc: 89.39% | Val Acc: 88.48% | Avg Total Nodes/Example: 14.23
+  (Sparsity: 36.49% of theoretical max 39 nodes)
+
+[epoch 6/10] lr=0.000500
+  Train Loss: -1.3957 (cls=0.2667, policy=-3.3247) | Val Loss: 0.3241
+  Train Acc: 90.24% | Val Acc: 88.53% | Avg Total Nodes/Example: 14.20
+  (Sparsity: 36.42% of theoretical max 39 nodes)
+
+[epoch 7/10] lr=0.000345
+  Train Loss: -1.4185 (cls=0.2489, policy=-3.3347) | Val Loss: 0.3177
+  Train Acc: 90.80% | Val Acc: 88.52% | Avg Total Nodes/Example: 14.21
+  (Sparsity: 36.45% of theoretical max 39 nodes)
+
+[epoch 8/10] lr=0.000206
+  Train Loss: -1.4200 (cls=0.2345, policy=-3.3092) | Val Loss: 0.3088
+  Train Acc: 91.32% | Val Acc: 89.23% | Avg Total Nodes/Example: 14.19
+  (Sparsity: 36.38% of theoretical max 39 nodes)
+
+[epoch 9/10] lr=0.000095
+  Train Loss: -1.4422 (cls=0.2244, policy=-3.3333) | Val Loss: 0.3078
+  Train Acc: 91.78% | Val Acc: 89.43% | Avg Total Nodes/Example: 14.25
+  (Sparsity: 36.53% of theoretical max 39 nodes)
+
+[epoch 10/10] lr=0.000024
+  Train Loss: -1.4478 (cls=0.2181, policy=-3.3317) | Val Loss: 0.3051
+  Train Acc: 91.97% | Val Acc: 89.45% | Avg Total Nodes/Example: 14.23
+  (Sparsity: 36.48% of theoretical max 39 nodes)
+
+Saved checkpoint → runs/20251220_025958/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p01_thr0p4_roll3_rep0/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p01_thr0p4_roll3_rep0.pt
+Best val loss: 0.3051 at epoch 10
+
+===============================================================================
+POST-TRAINING: Greedy Threshold Tuning Recommendations
+===============================================================================
+
+Your model was trained with:
+  lambda_efficiency = 0.01
+  greedy_threshold  = 0.4
+
+NEXT STEPS:
+
+1. Measure the learned grow_prob distribution:
+   python3 infer_fmnist_bfs.py --ckpt runs/20251220_025958/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p01_thr0p4_roll3_rep0/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p01_thr0p4_roll3_rep0.pt \
+       --debug_policy --node_samples 1000 --cpu
+
+   This will show you:
+   - Mean grow_prob (typically 0.40-0.50)
+   - % of decisions above threshold 0.5
+   - Distribution histogram
+
+2. Based on the measured mean_grow_prob, choose optimal threshold:
+
+   If mean_grow_prob ≈ 0.445, recommended settings:
+     • threshold = 0.50 → Root-only (1 node, max efficiency)
+     • threshold = 0.42 → Balanced (~6-8 nodes, good accuracy)
+     • threshold = 0.35 → Dense (~10-12 nodes, max accuracy)
+
+   General rule: optimal_threshold ≈ mean_grow_prob - 0.03
+
+3. Retrain with optimal threshold (if needed):
+   python3 train_fmnist_bfs.py \
+       --lambda_efficiency 0.01 \
+       --greedy_threshold 0.42 \
+       --epochs 10
+
+4. OR run full (λ, threshold) sweep to find optimal pair:
+   python3 bfs_training_matrix.py \
+       --config configs/threshold_sweep.yaml
+
+EMPIRICAL FINDINGS:
+  • Higher λ (0.05) often gives BETTER accuracy than lower λ (0.01)
+  • Policy learns grow_prob ≈ 0.44-0.45 regardless of λ value
+  • Default threshold=0.5 typically results in root-only inference
+  • Root-only achieves ~86-87% accuracy on FashionMNIST
+
+See docs/architecture.md for complete analysis and recommendations.
+===============================================================================
+
+__SUMMARY__ {"run": {"seed": 42, "epochs": 10, "batch_size": 64}, "optimizer": {"name": "adamw", "lr": 0.001, "weight_decay": 0.0}, "model": {"hidden_dim": 64, "max_depth": 2, "max_children": 3, "pooling_mode": "mean", "greedy_threshold": 0.4}, "policy": {"num_rollouts": 3, "lambda_efficiency": 0.01, "beta_entropy": 0.01, "beta_policy": 0.5}, "results": {"best_val_loss": 0.3050730538368225, "best_epoch": 10, "final_val_acc": 89.45}, "time": {"total_s": 221.08393359099864, "epoch_avg_s": 22.10839226989483, "last_epoch_s": 22.060653113992885}, "artifacts": {"checkpoint": "runs/20251220_025958/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p01_thr0p4_roll3_rep0/k3_poolmean_hd64_lr0p001_bs64_wd0p0_d2_lam0p01_thr0p4_roll3_rep0.pt"}}

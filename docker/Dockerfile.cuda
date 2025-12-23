@@ -1,5 +1,5 @@
 # ============================================================================
-# BoeNet CUDA Dockerfile (v1.0.0 - Language Model)
+# BoeNet CUDA Dockerfile (v1.0.2 - Language Model)
 # ============================================================================
 # GPU-enabled container for accelerated training and inference.
 #
@@ -104,6 +104,10 @@
 #   - Text generation with temperature, top-k, and top-p sampling
 #
 # Changelog:
+#   2025-12-22 - v1.0.2 BUGFIX:
+#                - Fixed HuggingFace cache permission error
+#                - Changed HF_DATASETS_CACHE and HF_HOME to /home/boenet/.cache/huggingface
+#                - This avoids permission conflicts with mounted volumes
 #   2025-12-22 - v1.0.1 BUGFIX:
 #                - Added datasets library for HuggingFace Shakespeare/TinyStories
 #                - Added datasets verification step during build
@@ -264,6 +268,11 @@ WORKDIR /app
 # This ensures we have permission to create all directories
 RUN mkdir -p /app/data /app/runs /app/figures /app/configs /app/checkpoints
 
+# Create HuggingFace cache directory in the user's home directory
+# CRITICAL: This must be in /home/boenet, NOT /app/data, to avoid permission
+# issues when /app/data is mounted as a volume from the host
+RUN mkdir -p /home/boenet/.cache/huggingface
+
 # Change ownership of the entire /app directory to boenet user
 # This must happen BEFORE the COPY command and BEFORE switching users
 RUN chown -R boenet:boenet /app
@@ -293,9 +302,21 @@ ENV BOENET_DEVICE=auto \
     BOENET_EMBED_DIM=64
 
 # HuggingFace datasets cache directory
-# This ensures datasets are cached in a persistent location when volume mounted
-ENV HF_DATASETS_CACHE=/app/data/huggingface_cache \
-    HF_HOME=/app/data/huggingface_home
+# CRITICAL FIX (v1.0.2): Use /home/boenet/.cache/huggingface instead of /app/data
+# 
+# PROBLEM: When /app/data is mounted from the host (-v $(pwd)/data:/app/data),
+# the mounted volume replaces the container's /app/data directory. The host
+# directory is owned by the host user (e.g., UID 1000), but inside the container,
+# the boenet user has a different UID and cannot create subdirectories.
+#
+# SOLUTION: Store HuggingFace cache in the user's home directory, which is
+# always owned by the container user regardless of volume mounts.
+#
+# NOTE: This means datasets are NOT persisted across container runs by default.
+# To persist the cache, mount a volume to /home/boenet/.cache:
+#   -v $(pwd)/.hf_cache:/home/boenet/.cache/huggingface
+ENV HF_DATASETS_CACHE=/home/boenet/.cache/huggingface \
+    HF_HOME=/home/boenet/.cache/huggingface
 
 # PyTorch CUDA settings
 # CRITICAL: Blackwell (RTX 50 series) uses sm_120, NOT sm_100
@@ -332,7 +353,7 @@ CMD ["python", "train_boenet.py", "--help"]
 # Labels
 # ----------------------------------------------------------------------------
 LABEL maintainer="BoeNet Project" \
-    version="1.0.1" \
+    version="1.0.2" \
     description="BoeNet CUDA Training and Inference Container for Language Models with Blackwell Support" \
     model.type="language" \
     model.architecture="BFS+REINFORCE" \
@@ -432,6 +453,13 @@ LABEL maintainer="BoeNet Project" \
 #        -v $(pwd):/app \
 #        boenet:cuda bash
 #
+# 9. PERSIST HUGGINGFACE CACHE (avoid re-downloading datasets):
+#    docker run --rm --gpus all \
+#        -v $(pwd)/data:/app/data \
+#        -v $(pwd)/runs:/app/runs \
+#        -v $(pwd)/.hf_cache:/home/boenet/.cache/huggingface \
+#        boenet:cuda python train_boenet.py --dataset shakespeare --epochs 10
+#
 # ============================================================================
 
 # ============================================================================
@@ -447,8 +475,8 @@ LABEL maintainer="BoeNet Project" \
 # BOENET_VOCAB_SIZE:  Vocabulary size (256 for char-level)
 # BOENET_SEQ_LEN:     Default sequence length
 # BOENET_EMBED_DIM:   Default embedding dimension
-# HF_DATASETS_CACHE:  HuggingFace datasets cache directory
-# HF_HOME:            HuggingFace home directory
+# HF_DATASETS_CACHE:  HuggingFace datasets cache directory (/home/boenet/.cache/huggingface)
+# HF_HOME:            HuggingFace home directory (/home/boenet/.cache/huggingface)
 #
 # Override any of these at runtime:
 #   docker run --rm --gpus all \
@@ -462,11 +490,12 @@ LABEL maintainer="BoeNet Project" \
 # Volume Mounts Reference
 # ============================================================================
 #
-# /app/data:       Dataset storage (Shakespeare, TinyStories, HuggingFace cache)
+# /app/data:       Dataset storage (for local text files)
 # /app/runs:       Training outputs (checkpoints, logs, CSVs)
 # /app/configs:    YAML configuration files
 # /app/figures:    Generated plots and visualizations
 # /app/checkpoints: Model checkpoints (alternative to runs/)
+# /home/boenet/.cache/huggingface: HuggingFace cache (optional, for persistence)
 #
 # Recommended mount command:
 #   docker run --rm --gpus all \
@@ -475,8 +504,12 @@ LABEL maintainer="BoeNet Project" \
 #       -v $(pwd)/configs:/app/configs \
 #       boenet:cuda <command>
 #
-# NOTE: Mounting /app/data ensures HuggingFace datasets are cached persistently
-#       across container runs, avoiding re-downloads.
+# To persist HuggingFace downloads across container runs:
+#   docker run --rm --gpus all \
+#       -v $(pwd)/data:/app/data \
+#       -v $(pwd)/runs:/app/runs \
+#       -v $(pwd)/.hf_cache:/home/boenet/.cache/huggingface \
+#       boenet:cuda <command>
 #
 # ============================================================================
 
@@ -500,23 +533,34 @@ LABEL maintainer="BoeNet Project" \
 #    - Ensure data volume is mounted: -v $(pwd)/data:/app/data
 #    - Dataset downloads automatically on first run
 #
-# 4. "Permission denied" error:
+# 4. "Permission denied" error for HuggingFace cache:
+#    - FIXED in v1.0.2: HuggingFace cache now uses /home/boenet/.cache/huggingface
+#    - This directory is owned by the container user and not affected by volume mounts
+#    - To persist cache, mount: -v $(pwd)/.hf_cache:/home/boenet/.cache/huggingface
+#    - Make sure the host directory exists and is writable: mkdir -p .hf_cache
+#
+# 5. "Permission denied" error for other directories:
 #    - Check volume ownership
 #    - Run: docker run --rm -v $(pwd)/data:/app/data boenet:cuda ls -la /app/data
+#    - Ensure host directories exist before mounting
 #
-# 5. Slow training:
+# 6. Slow training:
 #    - Verify GPU is being used: watch nvidia-smi
 #    - Check batch_size (larger = faster but more memory)
 #    - Use TensorFloat-32: export NVIDIA_TF32_OVERRIDE=1
 #
-# 6. Text generation produces garbage:
+# 7. Text generation produces garbage:
 #    - Model may not be trained enough (increase epochs)
 #    - Try lower temperature (0.5-0.8)
 #    - Use top_k or top_p sampling
 #
-# 7. HuggingFace download issues:
+# 8. HuggingFace download issues:
 #    - Check internet connectivity
 #    - Try setting HF_DATASETS_OFFLINE=1 if datasets are already cached
-#    - Mount data volume to persist cache: -v $(pwd)/data:/app/data
+#    - To persist cache: -v $(pwd)/.hf_cache:/home/boenet/.cache/huggingface
+#
+# 9. "trust_remote_code is not supported anymore" warning:
+#    - FIXED in data_utils.py v1.0.1: Removed deprecated parameter
+#    - This warning is harmless and can be ignored in older versions
 #
 # ============================================================================
