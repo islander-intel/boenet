@@ -1,0 +1,387 @@
+# ============================================================================
+# BoeNet Docker Build Context Exclusions (v1.0.1)
+# ============================================================================
+# This file specifies which files and directories should be excluded from
+# the Docker build context to speed up builds and reduce image size.
+#
+# IMPORTANT: This file MUST be placed in the project ROOT directory
+# (same level as train_boenet.py, not inside docker/ folder).
+# Docker only reads .dockerignore from the build context root.
+#
+# Build command (from project root):
+#   docker build -t boenet:cuda -f docker/Dockerfile.cuda .
+#
+# Changelog:
+#   v1.0.1 (2025-12-29):
+#     - Added data/.cache for HuggingFace cache exclusion
+#     - Added .hf_cache for alternative HuggingFace cache location
+#     - Added hub/ and datasets/ patterns for HuggingFace artifacts
+#     - Fixed Windows long path issues during Docker build
+#     - Updated header to clarify root directory requirement
+#     - Renamed project references from BFSNet to BoeNet
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# HuggingFace Cache (CRITICAL - Prevents Windows Long Path Errors)
+# ----------------------------------------------------------------------------
+# HuggingFace downloads create deeply nested directories with long paths
+# that cause "invalid file request" errors on Windows Docker builds.
+# These MUST be excluded from the build context.
+
+# Primary HuggingFace cache location (v1.0.3 Dockerfile default)
+data/.cache
+data/.cache/
+
+# Alternative HuggingFace cache locations
+.hf_cache
+.hf_cache/
+.cache/
+.cache/huggingface/
+
+# HuggingFace hub artifacts (can appear in various locations)
+**/hub/
+**/datasets--*/
+**/.locks/
+**/snapshots/
+**/refs/
+**/blobs/
+
+# ----------------------------------------------------------------------------
+# Git
+# ----------------------------------------------------------------------------
+.git
+.gitignore
+.gitattributes
+.github
+.gitlab-ci.yml
+
+# ----------------------------------------------------------------------------
+# Python
+# ----------------------------------------------------------------------------
+# Byte-compiled / optimized / DLL files
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.conda/
+conda-env/
+Pipfile.lock
+poetry.lock
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytest_cache/
+
+# mypy / type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# ----------------------------------------------------------------------------
+# Data and Model Files (Large Files)
+# ----------------------------------------------------------------------------
+# Dataset directories - exclude everything in data/ except structure
+data/
+data/**
+!data/.gitkeep
+
+# Alternative dataset locations
+datasets/
+FashionMNIST/
+MNIST/
+
+# Model checkpoints and weights
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+checkpoints/
+saved_models/
+models/
+
+# Training outputs and logs
+runs/
+runs/**
+outputs/
+results/
+experiments/
+logs/
+*.log
+
+# TensorBoard
+tensorboard/
+tb_logs/
+lightning_logs/
+
+# Weights & Biases
+wandb/
+*.wandb
+
+# MLflow
+mlruns/
+mlflow/
+
+# Large data files
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.bin
+*.pkl
+*.pickle
+*.npy
+*.npz
+
+# ----------------------------------------------------------------------------
+# IDE / Editor
+# ----------------------------------------------------------------------------
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.vim/
+
+# Emacs
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Spyder
+.spyderproject
+.spyproject
+
+# ----------------------------------------------------------------------------
+# Operating System
+# ----------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ----------------------------------------------------------------------------
+# Docker (Prevent Recursive Inclusion)
+# ----------------------------------------------------------------------------
+# Don't include Docker compose files in build context
+docker-compose*.yml
+docker-compose*.yaml
+
+# Keep Dockerfiles (they're needed for multi-stage builds)
+!docker/Dockerfile
+!docker/Dockerfile.*
+
+# ----------------------------------------------------------------------------
+# Documentation and Non-Essential Files
+# ----------------------------------------------------------------------------
+# Documentation
+docs/
+*.md
+!README.md
+LICENSE
+CHANGELOG
+CONTRIBUTING
+AUTHORS
+
+# Images and figures (unless needed in container)
+figures/
+images/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.pdf
+*.eps
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# ----------------------------------------------------------------------------
+# Testing (Optional - Comment Out if Tests Needed in Container)
+# ----------------------------------------------------------------------------
+# Uncomment these if you don't need tests in the container:
+# tests/
+# test_*.py
+# *_test.py
+# conftest.py
+
+# ----------------------------------------------------------------------------
+# CI/CD Configuration
+# ----------------------------------------------------------------------------
+.travis.yml
+.circleci/
+Jenkinsfile
+azure-pipelines.yml
+.drone.yml
+appveyor.yml
+tox.ini
+Makefile
+
+# ----------------------------------------------------------------------------
+# Project-Specific Exclusions
+# ----------------------------------------------------------------------------
+# Benchmark results
+bench_results/
+*.bench
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Secrets and credentials (NEVER include in images!)
+*.key
+*.pem
+*.secret
+secrets.yaml
+secrets.yml
+credentials.yaml
+credentials.yml
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# Local configuration overrides
+config.local.yaml
+config.local.yml
+*.local.yaml
+*.local.yml
+
+# ----------------------------------------------------------------------------
+# Transcripts and Conversation Logs
+# ----------------------------------------------------------------------------
+# Development conversation logs (from Claude/AI assistants)
+transcripts/
+*.transcript
+journal.txt
+
+# ----------------------------------------------------------------------------
+# Keep These Files (Negation Patterns)
+# ----------------------------------------------------------------------------
+# Essential Python files
+!*.py
+!requirements.txt
+!requirements-dev.txt
+!setup.py
+!setup.cfg
+!pyproject.toml
+
+# Essential config files (but not the runtime configs directory)
+!configs/
+!configs/**/*.yaml
+!configs/**/*.yml
+
+# Package init files
+!**/__init__.py
+
+# Scripts directory
+!scripts/
+!scripts/*.py
+
+# Core package directories
+!boenet/
+!boenet/**/*.py
+!losses/
+!losses/*.py
+!utils/
+!utils/*.py
+
+# Docker directory (for Dockerfiles)
+!docker/
+!docker/Dockerfile
+!docker/Dockerfile.*

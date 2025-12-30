@@ -1,5 +1,5 @@
 # ============================================================================
-# BoeNet CUDA Dockerfile (v1.0.2 - Language Model)
+# BoeNet CUDA Dockerfile (v1.0.3 - Language Model)
 # ============================================================================
 # GPU-enabled container for accelerated training and inference.
 #
@@ -21,7 +21,7 @@
 # Run (foreground):
 #   docker run --rm --gpus all \
 #       -v $(pwd)/data:/app/data -v $(pwd)/runs:/app/runs \
-#       boenet:cuda python train_boenet.py --epochs 10 --dataset shakespeare
+#       boenet:cuda python train_boenet.py --epochs 10 --dataset wikitext2
 #
 # Run in Background (detached mode - survives terminal close/sleep):
 #   docker run -d --gpus all \
@@ -90,7 +90,7 @@
 # Installed Python Packages:
 #   - PyTorch 2.7.1 (cu128) - Deep learning framework with Blackwell support
 #   - torchvision - Vision utilities (for potential multi-modal extensions)
-#   - datasets - HuggingFace datasets for Shakespeare/TinyStories (REQUIRED)
+#   - datasets - HuggingFace datasets for WikiText-2/Shakespeare/TinyStories (REQUIRED)
 #   - tqdm - Progress bars for training matrix
 #   - pyyaml - YAML config file support
 #   - pandas - Data analysis for results
@@ -98,12 +98,19 @@
 #   - scikit-learn - ML utilities
 #
 # Language Model Specific:
-#   - Supports Shakespeare and TinyStories datasets via HuggingFace
+#   - Supports WikiText-2, WikiText-103, Shakespeare, TinyStories, and custom text files
 #   - Character-level tokenization (vocab_size=256)
 #   - Configurable sequence length (seq_len) and embedding dimension (embed_dim)
 #   - Text generation with temperature, top-k, and top-p sampling
 #
 # Changelog:
+#   2025-12-29 - v1.0.3 BUGFIX:
+#                - Fixed HuggingFace cache permission error for Docker volume mounts
+#                - Changed HF_DATASETS_CACHE and HF_HOME to /app/data/.cache
+#                - This allows HuggingFace to write to mounted /app/data volume
+#                - Cache persists across container runs when data volume is mounted
+#                - Works correctly on both Linux and Windows Docker hosts
+#                - Updated default dataset from shakespeare to wikitext2
 #   2025-12-22 - v1.0.2 BUGFIX:
 #                - Fixed HuggingFace cache permission error
 #                - Changed HF_DATASETS_CACHE and HF_HOME to /home/boenet/.cache/huggingface
@@ -227,7 +234,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Install additional packages with updated versions
 # CRITICAL: tqdm is REQUIRED for progress bars in boenet_training_matrix.py
-# CRITICAL: datasets is REQUIRED for HuggingFace Shakespeare/TinyStories
+# CRITICAL: datasets is REQUIRED for HuggingFace WikiText-2/Shakespeare/TinyStories
 RUN pip install --no-cache-dir \
     pyyaml>=6.0.0 \
     tqdm>=4.66.0 \
@@ -242,7 +249,7 @@ RUN pip install --no-cache-dir \
 # Verify tqdm installation (required for progress bars in boenet_training_matrix.py)
 RUN python -c "import tqdm; print(f'tqdm installed successfully, version: {tqdm.__version__}')"
 
-# Verify datasets installation (required for Shakespeare/TinyStories)
+# Verify datasets installation (required for WikiText-2/Shakespeare/TinyStories)
 RUN python -c "import datasets; print(f'datasets installed successfully, version: {datasets.__version__}')"
 
 # Optional: Install NVIDIA tools for monitoring
@@ -264,17 +271,39 @@ RUN useradd --create-home --shell /bin/bash boenet
 # Set working directory (still running as root at this point)
 WORKDIR /app
 
+# ----------------------------------------------------------------------------
+# Directory Creation and Permissions (CRITICAL FOR HUGGINGFACE)
+# ----------------------------------------------------------------------------
 # Create necessary directories AS ROOT (before switching to boenet user)
 # This ensures we have permission to create all directories
-RUN mkdir -p /app/data /app/runs /app/figures /app/configs /app/checkpoints
+#
+# CRITICAL FIX (v1.0.3): Create /app/data/.cache for HuggingFace
+# 
+# The HuggingFace datasets library needs a writable cache directory.
+# By placing it under /app/data/.cache, it will:
+#   1. Be writable when /app/data is mounted from the host
+#   2. Persist across container runs (datasets are cached)
+#   3. Work correctly on both Linux and Windows Docker hosts
+#
+# Directory structure:
+#   /app/data/          - Data directory (mounted from host)
+#   /app/data/.cache/   - HuggingFace cache (inside mounted volume)
+#   /app/runs/          - Training outputs (mounted from host)
+#   /app/configs/       - Configuration files (mounted from host)
+#   /app/figures/       - Generated plots
+#   /app/checkpoints/   - Model checkpoints
 
-# Create HuggingFace cache directory in the user's home directory
-# CRITICAL: This must be in /home/boenet, NOT /app/data, to avoid permission
-# issues when /app/data is mounted as a volume from the host
-RUN mkdir -p /home/boenet/.cache/huggingface
+RUN mkdir -p /app/data/.cache \
+    && mkdir -p /app/runs \
+    && mkdir -p /app/figures \
+    && mkdir -p /app/configs \
+    && mkdir -p /app/checkpoints
 
 # Change ownership of the entire /app directory to boenet user
 # This must happen BEFORE the COPY command and BEFORE switching users
+# CRITICAL: This ensures boenet can write to /app/data/.cache even when
+# /app/data is mounted from the host (the .cache subdirectory permissions
+# are determined by the container, not the host mount)
 RUN chown -R boenet:boenet /app
 
 # Now switch to non-root user
@@ -291,32 +320,46 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # BoeNet settings (language model)
+# Updated default dataset from shakespeare to wikitext2 (v2.0.0)
 ENV BOENET_DEVICE=auto \
     BOENET_DATA_ROOT=/app/data \
     BOENET_RUNS_ROOT=/app/runs \
     BOENET_CONFIG=/app/configs/experiment-config.yaml \
     BOENET_LOG_LEVEL=INFO \
-    BOENET_DATASET=shakespeare \
+    BOENET_DATASET=wikitext2 \
     BOENET_VOCAB_SIZE=256 \
     BOENET_SEQ_LEN=128 \
     BOENET_EMBED_DIM=64
 
-# HuggingFace datasets cache directory
-# CRITICAL FIX (v1.0.2): Use /home/boenet/.cache/huggingface instead of /app/data
-# 
-# PROBLEM: When /app/data is mounted from the host (-v $(pwd)/data:/app/data),
-# the mounted volume replaces the container's /app/data directory. The host
-# directory is owned by the host user (e.g., UID 1000), but inside the container,
-# the boenet user has a different UID and cannot create subdirectories.
+# ----------------------------------------------------------------------------
+# HuggingFace Cache Configuration (CRITICAL FIX v1.0.3)
+# ----------------------------------------------------------------------------
+# PROBLEM (v1.0.2 and earlier):
+#   When HF_HOME was set to /home/boenet/.cache/huggingface, HuggingFace could
+#   download datasets, but when running boenet_training_matrix.py which spawns
+#   subprocesses, the subprocess environment sometimes didn't inherit the
+#   runtime -e HF_HOME override, causing permission errors.
 #
-# SOLUTION: Store HuggingFace cache in the user's home directory, which is
-# always owned by the container user regardless of volume mounts.
+# SOLUTION (v1.0.3):
+#   Set HF_HOME and HF_DATASETS_CACHE to /app/data/.cache in the Dockerfile.
+#   This directory is:
+#     1. Created during build with correct boenet ownership
+#     2. Inside the mounted /app/data volume, so it persists
+#     3. Automatically inherited by all subprocesses
+#     4. Works on both Linux and Windows Docker hosts
 #
-# NOTE: This means datasets are NOT persisted across container runs by default.
-# To persist the cache, mount a volume to /home/boenet/.cache:
-#   -v $(pwd)/.hf_cache:/home/boenet/.cache/huggingface
-ENV HF_DATASETS_CACHE=/home/boenet/.cache/huggingface \
-    HF_HOME=/home/boenet/.cache/huggingface
+# BENEFITS:
+#   - No need to pass -e HF_HOME at runtime
+#   - Cache persists across container runs (no re-downloading)
+#   - Subprocesses inherit the correct cache location
+#   - Works with volume mounts on Windows (NTFS) and Linux (ext4)
+#
+# NOTE: If the host /app/data directory doesn't exist before mounting,
+# Docker will create it. The .cache subdirectory will be created by
+# HuggingFace on first download.
+
+ENV HF_DATASETS_CACHE=/app/data/.cache \
+    HF_HOME=/app/data/.cache
 
 # PyTorch CUDA settings
 # CRITICAL: Blackwell (RTX 50 series) uses sm_120, NOT sm_100
@@ -353,7 +396,7 @@ CMD ["python", "train_boenet.py", "--help"]
 # Labels
 # ----------------------------------------------------------------------------
 LABEL maintainer="BoeNet Project" \
-    version="1.0.2" \
+    version="1.0.3" \
     description="BoeNet CUDA Training and Inference Container for Language Models with Blackwell Support" \
     model.type="language" \
     model.architecture="BFS+REINFORCE" \
@@ -364,7 +407,8 @@ LABEL maintainer="BoeNet Project" \
     pytorch.cuda.index="cu128" \
     blackwell.compute.capability="sm_120" \
     supported.architectures="Pascal, Volta, Turing, Ampere, Ada Lovelace, Hopper, Blackwell" \
-    supported.datasets="shakespeare, tinystories, textfile" \
+    supported.datasets="wikitext2, wikitext103, shakespeare, tinystories, bookcorpus, openwebtext, textfile" \
+    default.dataset="wikitext2" \
     features="tqdm progress bars, YAML config, text generation, perplexity metrics, policy analysis, HuggingFace datasets" \
     scripts.train="train_boenet.py" \
     scripts.infer="infer_boenet.py" \
@@ -378,12 +422,12 @@ LABEL maintainer="BoeNet Project" \
 # Usage Examples
 # ============================================================================
 #
-# 1. TRAINING ON SHAKESPEARE (Quick Start):
+# 1. TRAINING ON WIKITEXT-2 (Quick Start - DEFAULT):
 #    docker run --rm --gpus all \
 #        -v $(pwd)/data:/app/data \
 #        -v $(pwd)/runs:/app/runs \
 #        boenet:cuda python train_boenet.py \
-#            --dataset shakespeare \
+#            --dataset wikitext2 \
 #            --epochs 10 \
 #            --seq_len 128 \
 #            --embed_dim 64 \
@@ -393,7 +437,16 @@ LABEL maintainer="BoeNet Project" \
 #            --lambda_efficiency 0.05 \
 #            --greedy_threshold 0.42
 #
-# 2. TRAINING ON TINYSTORIES (Larger Dataset):
+# 2. TRAINING ON SHAKESPEARE:
+#    docker run --rm --gpus all \
+#        -v $(pwd)/data:/app/data \
+#        -v $(pwd)/runs:/app/runs \
+#        boenet:cuda python train_boenet.py \
+#            --dataset shakespeare \
+#            --epochs 10 \
+#            --seq_len 128
+#
+# 3. TRAINING ON TINYSTORIES (Larger Dataset):
 #    docker run --rm --gpus all \
 #        -v $(pwd)/data:/app/data \
 #        -v $(pwd)/runs:/app/runs \
@@ -405,7 +458,7 @@ LABEL maintainer="BoeNet Project" \
 #            --hidden_dim 256 \
 #            --batch_size 32
 #
-# 3. TEXT GENERATION:
+# 4. TEXT GENERATION:
 #    docker run --rm -it --gpus all \
 #        -v $(pwd)/runs:/app/runs \
 #        boenet:cuda python infer_boenet.py \
@@ -416,7 +469,7 @@ LABEL maintainer="BoeNet Project" \
 #            --temperature 0.8 \
 #            --top_k 40
 #
-# 4. POLICY ANALYSIS (Debug):
+# 5. POLICY ANALYSIS (Debug):
 #    docker run --rm --gpus all \
 #        -v $(pwd)/runs:/app/runs \
 #        boenet:cuda python infer_boenet.py \
@@ -424,7 +477,7 @@ LABEL maintainer="BoeNet Project" \
 #            --debug_policy \
 #            --samples 1000
 #
-# 5. FULL SWEEP (Background):
+# 6. FULL SWEEP (Background):
 #    docker run -d --gpus all \
 #        --name boenet_sweep \
 #        -v $(pwd)/data:/app/data \
@@ -436,7 +489,7 @@ LABEL maintainer="BoeNet Project" \
 #    # Monitor:
 #    docker logs -f boenet_sweep
 #
-# 6. QUICK TEST (CI/CD):
+# 7. QUICK TEST (CI/CD):
 #    docker run --rm --gpus all \
 #        -v $(pwd)/data:/app/data \
 #        -v $(pwd)/runs:/app/runs \
@@ -444,21 +497,22 @@ LABEL maintainer="BoeNet Project" \
 #        boenet:cuda python boenet_training_matrix.py \
 #            --config configs/test-config.yaml
 #
-# 7. SPARSITY TESTS:
+# 8. SPARSITY TESTS:
 #    docker run --rm --gpus all \
 #        boenet:cuda python test_true_sparsity_boenet.py
 #
-# 8. INTERACTIVE SHELL:
+# 9. INTERACTIVE SHELL:
 #    docker run --rm -it --gpus all \
 #        -v $(pwd):/app \
 #        boenet:cuda bash
 #
-# 9. PERSIST HUGGINGFACE CACHE (avoid re-downloading datasets):
-#    docker run --rm --gpus all \
-#        -v $(pwd)/data:/app/data \
-#        -v $(pwd)/runs:/app/runs \
-#        -v $(pwd)/.hf_cache:/home/boenet/.cache/huggingface \
-#        boenet:cuda python train_boenet.py --dataset shakespeare --epochs 10
+# 10. WINDOWS POWERSHELL (use ${PWD} instead of $(pwd)):
+#     docker run --rm `
+#         -v ${PWD}/data:/app/data `
+#         -v ${PWD}/runs:/app/runs `
+#         -v ${PWD}/configs:/app/configs `
+#         -v ${PWD}/boenet:/app/boenet `
+#         boenet:cuda python boenet_training_matrix.py --config configs/experiment-config.yaml
 #
 # ============================================================================
 
@@ -471,12 +525,12 @@ LABEL maintainer="BoeNet Project" \
 # BOENET_RUNS_ROOT:   Output/runs directory path
 # BOENET_CONFIG:      Default config file path
 # BOENET_LOG_LEVEL:   Logging level (DEBUG, INFO, WARNING, ERROR)
-# BOENET_DATASET:     Default dataset (shakespeare, tinystories)
+# BOENET_DATASET:     Default dataset (wikitext2, shakespeare, tinystories)
 # BOENET_VOCAB_SIZE:  Vocabulary size (256 for char-level)
 # BOENET_SEQ_LEN:     Default sequence length
 # BOENET_EMBED_DIM:   Default embedding dimension
-# HF_DATASETS_CACHE:  HuggingFace datasets cache directory (/home/boenet/.cache/huggingface)
-# HF_HOME:            HuggingFace home directory (/home/boenet/.cache/huggingface)
+# HF_DATASETS_CACHE:  HuggingFace datasets cache directory (/app/data/.cache)
+# HF_HOME:            HuggingFace home directory (/app/data/.cache)
 #
 # Override any of these at runtime:
 #   docker run --rm --gpus all \
@@ -490,26 +544,30 @@ LABEL maintainer="BoeNet Project" \
 # Volume Mounts Reference
 # ============================================================================
 #
-# /app/data:       Dataset storage (for local text files)
-# /app/runs:       Training outputs (checkpoints, logs, CSVs)
-# /app/configs:    YAML configuration files
-# /app/figures:    Generated plots and visualizations
+# /app/data:        Dataset storage AND HuggingFace cache (/app/data/.cache)
+# /app/runs:        Training outputs (checkpoints, logs, CSVs)
+# /app/configs:     YAML configuration files
+# /app/figures:     Generated plots and visualizations
 # /app/checkpoints: Model checkpoints (alternative to runs/)
-# /home/boenet/.cache/huggingface: HuggingFace cache (optional, for persistence)
+# /app/boenet:      (Optional) Mount source code for development
 #
-# Recommended mount command:
+# Recommended mount command (Linux/macOS):
 #   docker run --rm --gpus all \
 #       -v $(pwd)/data:/app/data \
 #       -v $(pwd)/runs:/app/runs \
 #       -v $(pwd)/configs:/app/configs \
 #       boenet:cuda <command>
 #
-# To persist HuggingFace downloads across container runs:
-#   docker run --rm --gpus all \
-#       -v $(pwd)/data:/app/data \
-#       -v $(pwd)/runs:/app/runs \
-#       -v $(pwd)/.hf_cache:/home/boenet/.cache/huggingface \
+# Recommended mount command (Windows PowerShell):
+#   docker run --rm `
+#       -v ${PWD}/data:/app/data `
+#       -v ${PWD}/runs:/app/runs `
+#       -v ${PWD}/configs:/app/configs `
 #       boenet:cuda <command>
+#
+# NOTE (v1.0.3): HuggingFace cache is now stored in /app/data/.cache by default.
+# This means datasets are automatically persisted when you mount /app/data.
+# No separate cache mount is needed!
 #
 # ============================================================================
 
@@ -521,6 +579,7 @@ LABEL maintainer="BoeNet Project" \
 #    - Ensure NVIDIA Container Toolkit is installed
 #    - Run: nvidia-smi (should show GPU info)
 #    - Use --gpus all flag
+#    - On Windows: Enable WSL2 GPU support in Docker Desktop settings
 #
 # 2. "Out of memory" error:
 #    - Reduce batch_size (e.g., 32 or 16)
@@ -534,15 +593,16 @@ LABEL maintainer="BoeNet Project" \
 #    - Dataset downloads automatically on first run
 #
 # 4. "Permission denied" error for HuggingFace cache:
-#    - FIXED in v1.0.2: HuggingFace cache now uses /home/boenet/.cache/huggingface
-#    - This directory is owned by the container user and not affected by volume mounts
-#    - To persist cache, mount: -v $(pwd)/.hf_cache:/home/boenet/.cache/huggingface
-#    - Make sure the host directory exists and is writable: mkdir -p .hf_cache
+#    - FIXED in v1.0.3: HuggingFace cache now uses /app/data/.cache
+#    - This directory is inside the mounted volume and writable
+#    - Make sure /app/data is mounted: -v $(pwd)/data:/app/data
+#    - On Windows, ensure Docker has access to the drive
 #
 # 5. "Permission denied" error for other directories:
 #    - Check volume ownership
 #    - Run: docker run --rm -v $(pwd)/data:/app/data boenet:cuda ls -la /app/data
 #    - Ensure host directories exist before mounting
+#    - On Windows: Check Docker Desktop -> Settings -> Resources -> File Sharing
 #
 # 6. Slow training:
 #    - Verify GPU is being used: watch nvidia-smi
@@ -557,10 +617,16 @@ LABEL maintainer="BoeNet Project" \
 # 8. HuggingFace download issues:
 #    - Check internet connectivity
 #    - Try setting HF_DATASETS_OFFLINE=1 if datasets are already cached
-#    - To persist cache: -v $(pwd)/.hf_cache:/home/boenet/.cache/huggingface
+#    - Cache is stored in /app/data/.cache (persists with volume mount)
 #
 # 9. "trust_remote_code is not supported anymore" warning:
-#    - FIXED in data_utils.py v1.0.1: Removed deprecated parameter
+#    - FIXED in data_utils.py v2.0.0: Removed deprecated parameter
 #    - This warning is harmless and can be ignored in older versions
+#
+# 10. Windows-specific issues:
+#     - Use ${PWD} instead of $(pwd) in PowerShell
+#     - Use %cd% in CMD
+#     - Ensure Docker Desktop is running
+#     - Enable WSL2 backend for best performance
 #
 # ============================================================================

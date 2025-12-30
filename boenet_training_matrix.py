@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-boenet_training_matrix.py (v2.0.0 - Language Model)
+boenet_training_matrix.py (v2.0.1 - Language Model)
 
 Run a *full factorial* matrix of BoeNet experiments on WikiText-2/Shakespeare/TinyStories by spawning:
   * train_boenet.py   (training: logs + checkpoint)
@@ -16,6 +16,12 @@ Key Changes:
   - CHANGED: Calls train_boenet.py and infer_boenet.py instead of BFSNet scripts
   - CHANGED: Default dataset from shakespeare to wikitext2 (v2.0.0)
   - UNCHANGED: All sweep logic, factorial matrix, subprocess runners, progress bar
+
+v2.0.1 Bug Fix (2025-12-28):
+----------------------------
+  - FIXED: run_training() now skips vocab_size when building command args
+  - train_boenet.py does NOT accept --vocab_size (determined from tokenizer)
+  - Added skip_keys = {"tag", "vocab_size"} to prevent argument errors
 
 v2.0.0 Dataset Changes:
 -----------------------
@@ -97,7 +103,7 @@ When K=0 (dense/MLP baseline):
 
 Config File Format (YAML)
 -------------------------
-Example configs/boenet-config.yaml:
+Example configs/experiment-config.yaml:
 ```yaml
 # BoeNet v2.0.0 Training Matrix Configuration
 sweep:
@@ -161,8 +167,8 @@ This script uses tqdm to display progress:
   - Current configuration tag
 
 Author: BoeNet project (converted from BFSNet)
-Version: 2.0.0
-Date: 2025-12-22
+Version: 2.0.1
+Date: 2025-12-28
 """
 
 from __future__ import annotations
@@ -225,8 +231,10 @@ def _extract_float(pat: re.Pattern, text: str) -> Optional[float]:
     except Exception:
         return None
 
+
 def _lower_keys(d: Dict[str, Any]) -> Dict[str, Any]:
     return {str(k).lower(): v for k, v in d.items()}
+
 
 def _safe_int(x: Any) -> Optional[int]:
     try:
@@ -240,6 +248,7 @@ def _safe_int(x: Any) -> Optional[int]:
     except Exception:
         return None
 
+
 def _safe_float(x: Any) -> Optional[float]:
     """Safely convert a value to float, returning None on failure."""
     if x is None:
@@ -249,16 +258,19 @@ def _safe_float(x: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
 
+
 def _slug(v: Any) -> str:
     s = str(v)
     s = s.replace("->", "to").replace(".", "p").replace("-", "m").replace("+", "plus")
     s = re.sub(r"[^A-Za-z0-9_]+", "", s)
     return s
 
+
 def _merge(base: Dict[str, Any], **overrides: Any) -> Dict[str, Any]:
     out = dict(base)
     out.update(overrides)
     return out
+
 
 def _format_duration(seconds: float) -> str:
     """Format seconds into human-readable duration string."""
@@ -309,8 +321,10 @@ def get_config_value(config: Dict[str, Any], section: str, key: str, default: An
 def _parse_list_str(raw: str) -> List[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
 
+
 def _parse_list_float(raw: str) -> List[float]:
     return [float(tok) for tok in _parse_list_str(raw)]
+
 
 def _parse_list_int(raw: str) -> List[int]:
     return [int(tok) for tok in _parse_list_str(raw)]
@@ -392,6 +406,13 @@ def build_factorial_matrix(
     ------------------------
     For K>0, all parameters are swept as specified including the v2.0.0
     policy parameters (lambda_efficiency, greedy_threshold).
+    
+    Note on vocab_size:
+    -------------------
+    vocab_size is stored in the config for CSV logging purposes, but it is
+    NOT passed to train_boenet.py as a command-line argument. The training
+    script determines vocab_size automatically from the tokenizer (always 256
+    for character-level tokenization).
     """
     base_common = dict(
         lr_schedule="cosine",
@@ -483,6 +504,7 @@ def build_factorial_matrix(
 
 class RunRecorder:
     """Collects metrics for one training run (v2.0.0 Language Model)."""
+    
     def __init__(self, run_id: int, tag: str):
         self.run_id = run_id
         self.tag = tag
@@ -656,7 +678,18 @@ def _tee_process(cmd: List[str], log_file: Optional[Path] = None,
 
 def run_training(train_script: str, python_exe: str, run_dir: Path, 
                  run_id: int, cfg: Dict[str, Any]) -> Tuple[RunRecorder, Path, str, bool]:
-    """Launch one trainer run; parse logs into a RunRecorder."""
+    """
+    Launch one trainer run; parse logs into a RunRecorder.
+    
+    v2.0.1 Fix:
+    -----------
+    The vocab_size parameter is stored in cfg for CSV logging, but train_boenet.py
+    does NOT accept --vocab_size as a command-line argument (it determines vocab_size
+    automatically from the tokenizer, which is always 256 for char-level).
+    
+    We skip vocab_size (and tag) when building the command to prevent:
+        train_boenet.py: error: unrecognized arguments: --vocab_size 256
+    """
     tag = cfg.get("tag", f"run_{run_id:03d}")
     log_path = run_dir / f"run_{run_id:03d}.log"
     ckpt_path = run_dir / f"{tag}.pt"
@@ -665,8 +698,14 @@ def run_training(train_script: str, python_exe: str, run_dir: Path,
     args["save_path"] = str(ckpt_path)
 
     cmd = [python_exe, "-u", train_script]
+    
+    # v2.0.1 FIX: Skip keys that train_boenet.py does not accept
+    # - tag: internal identifier, not a training parameter
+    # - vocab_size: determined automatically from tokenizer (always 256 for char-level)
+    skip_keys = {"tag", "vocab_size"}
+    
     for k, v in args.items():
-        if k == "tag":
+        if k in skip_keys:
             continue
         flag = f"--{k}"
         if isinstance(v, bool):
@@ -1015,7 +1054,7 @@ def main():
     kpos_count = len(matrix) - k0_count
     total_runs = len(matrix) * int(repeats)
     
-    print(f"[matrix] BoeNet v2.0.0 Language Model Training Matrix")
+    print(f"[matrix] BoeNet v2.0.1 Language Model Training Matrix")
     print(f"[matrix] Dataset: {dataset}")
     print(f"[matrix] Planned cells: {len(matrix)} | repeats: {repeats} | total: {total_runs}")
     print(f"[matrix] K=0 (dense): {k0_count} | K>0 (BFS): {kpos_count}")
