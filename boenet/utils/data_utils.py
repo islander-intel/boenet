@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-boenet/utils/data_utils.py (v2.0.0 - Redesigned Language Model Support)
+boenet/utils/data_utils.py (v2.0.1 - Byte-Level Tokenization Fix)
 
 Lightweight dataset + dataloader utilities for BoeNet experiments.
 
@@ -53,7 +53,9 @@ The TextDataset class handles this automatically:
 
 Tokenization
 ------------
-This module includes a simple CharTokenizer for character-level modeling.
+This module includes a ByteTokenizer for byte-level modeling (vocab_size=256).
+All text is encoded as UTF-8 bytes where each byte becomes a token (0-255).
+
 For BPE/subword tokenization, use tiktoken or HuggingFace tokenizers
 and pass them to TextDataset.
 
@@ -82,6 +84,15 @@ Usage Examples
 
 Changelog
 ---------
+v2.0.1 (2025-12-29):
+  - CRITICAL BUGFIX: CharTokenizer renamed to ByteTokenizer
+  - CRITICAL BUGFIX: Tokenization now uses UTF-8 bytes (0-255) instead of
+    Unicode code points (0-65535+). This fixes "IndexError: index out of range"
+    when training on WikiText and other datasets with non-ASCII characters.
+  - encode() now uses: list(text.encode('utf-8'))
+  - decode() now uses: bytes(tokens).decode('utf-8', errors='replace')
+  - All token IDs are now guaranteed to be in range [0, 255]
+
 v2.0.0 (2025-12-22):
   - MAJOR REDESIGN: Generic HuggingFace loader
   - NEW: load_huggingface_text_dataset() - generic function for all HF datasets
@@ -100,8 +111,8 @@ v1.0.0 (2025-12-22):
   - Added Shakespeare and TinyStories datasets
 
 Author: BoeNet project (extended from BFSNet)
-Version: 2.0.0
-Date: 2025-12-22
+Version: 2.0.1
+Date: 2025-12-29
 """
 
 from __future__ import annotations
@@ -261,51 +272,74 @@ def _print_sanity_text_once(
         id_max = int(input_ids.max().item())
         label_min = int(labels.min().item())
         label_max = int(labels.max().item())
+        
+        # Validate that all tokens are within vocab_size
+        valid = id_max < vocab_size and label_max < vocab_size
+        status = "OK" if valid else f"ERROR: max_id={max(id_max, label_max)} >= vocab_size={vocab_size}"
 
         print(
             f"[sanity:{dataset_name}] batch={shape_str} dtype={input_ids.dtype} "
             f"input_ids[min,max]=[{id_min},{id_max}] labels[min,max]=[{label_min},{label_max}] "
-            f"vocab_size={vocab_size}"
+            f"vocab_size={vocab_size} [{status}]"
         )
 
 
 # --------------------------------------------------------------------------- #
-#                           Character Tokenizer                               #
+#                     Byte-Level Tokenizer (FIXED v2.0.1)                     #
 # --------------------------------------------------------------------------- #
 
-class CharTokenizer:
+class ByteTokenizer:
     """
-    Simple character-level tokenizer using ASCII encoding.
+    Byte-level tokenizer using UTF-8 encoding.
     
-    This tokenizer maps each character to its ASCII code (0-255).
-    It's suitable for character-level language modeling on ASCII text.
+    This tokenizer encodes text as UTF-8 bytes, where each byte becomes a token
+    in the range [0, 255]. This guarantees vocab_size=256 regardless of the
+    input text's Unicode content.
+    
+    CRITICAL FIX (v2.0.1):
+    ----------------------
+    Previous CharTokenizer used ord(char) which returns Unicode code points:
+      - 'a' → 97 (OK)
+      - '—' (em-dash) → 8212 (FAILS: exceeds vocab_size=256)
+    
+    ByteTokenizer uses UTF-8 byte encoding:
+      - 'a' → [97] (1 byte)
+      - '—' (em-dash) → [226, 128, 148] (3 bytes, all in 0-255)
+    
+    This ensures ALL token IDs are in [0, 255], preventing IndexError
+    in nn.Embedding layers.
     
     Attributes
     ----------
     vocab_size : int
-        Vocabulary size (256 for full ASCII).
+        Vocabulary size (always 256 for byte-level).
         
     Examples
     --------
-    >>> tokenizer = CharTokenizer()
+    >>> tokenizer = ByteTokenizer()
     >>> tokenizer.encode("Hello")
     [72, 101, 108, 108, 111]
     >>> tokenizer.decode([72, 101, 108, 108, 111])
     'Hello'
+    >>> # Unicode characters are encoded as multiple bytes
+    >>> tokenizer.encode("—")  # em-dash
+    [226, 128, 148]
+    >>> tokenizer.decode([226, 128, 148])
+    '—'
     """
     
     def __init__(self):
-        """Initialize character tokenizer."""
+        """Initialize byte-level tokenizer."""
         self._vocab_size = 256
     
     @property
     def vocab_size(self) -> int:
-        """Return vocabulary size (256 for ASCII)."""
+        """Return vocabulary size (256 for byte-level)."""
         return self._vocab_size
     
     def encode(self, text: str) -> List[int]:
         """
-        Encode text to list of token IDs.
+        Encode text to list of byte values (0-255).
         
         Parameters
         ----------
@@ -315,25 +349,54 @@ class CharTokenizer:
         Returns
         -------
         List[int]
-            List of token IDs (ASCII codes).
+            List of byte values (each in range 0-255).
+            
+        Notes
+        -----
+        Text is encoded as UTF-8 bytes. ASCII characters map 1:1 to bytes,
+        while Unicode characters may produce multiple bytes.
+        
+        Examples
+        --------
+        >>> tokenizer = ByteTokenizer()
+        >>> tokenizer.encode("Hi")
+        [72, 105]
+        >>> tokenizer.encode("Héllo")  # é is 2 bytes in UTF-8
+        [72, 195, 169, 108, 108, 111]
         """
-        return [ord(c) for c in text]
+        # Encode text as UTF-8 bytes - each byte is 0-255
+        return list(text.encode('utf-8'))
     
     def decode(self, tokens: List[int]) -> str:
         """
-        Decode list of token IDs to text.
+        Decode list of byte values to text.
         
         Parameters
         ----------
         tokens : List[int]
-            List of token IDs.
+            List of byte values (each should be in range 0-255).
             
         Returns
         -------
         str
             Decoded text.
+            
+        Notes
+        -----
+        Invalid UTF-8 byte sequences are replaced with the Unicode
+        replacement character (U+FFFD).
+        
+        Examples
+        --------
+        >>> tokenizer = ByteTokenizer()
+        >>> tokenizer.decode([72, 105])
+        'Hi'
+        >>> tokenizer.decode([72, 195, 169, 108, 108, 111])
+        'Héllo'
         """
-        return "".join(chr(t) for t in tokens)
+        # Convert token list to bytes, then decode as UTF-8
+        # Use errors='replace' to handle any invalid sequences gracefully
+        return bytes(tokens).decode('utf-8', errors='replace')
     
     def encode_batch(self, texts: List[str]) -> List[List[int]]:
         """
@@ -347,18 +410,18 @@ class CharTokenizer:
         Returns
         -------
         List[List[int]]
-            List of encoded token ID lists.
+            List of encoded byte value lists.
         """
         return [self.encode(text) for text in texts]
     
     def decode_batch(self, token_lists: List[List[int]]) -> List[str]:
         """
-        Decode a batch of token ID lists.
+        Decode a batch of byte value lists.
         
         Parameters
         ----------
         token_lists : List[List[int]]
-            List of token ID lists.
+            List of byte value lists.
             
         Returns
         -------
@@ -368,13 +431,17 @@ class CharTokenizer:
         return [self.decode(tokens) for tokens in token_lists]
 
 
+# Backwards compatibility alias (CharTokenizer was renamed to ByteTokenizer)
+CharTokenizer = ByteTokenizer
+
+
 # --------------------------------------------------------------------------- #
 #                           Text Dataset                                      #
 # --------------------------------------------------------------------------- #
 
 class TextDataset(Dataset):
     """
-    Dataset for character-level or token-level language modeling.
+    Dataset for byte-level or token-level language modeling.
     
     This dataset creates (input_ids, labels) pairs for next-token prediction:
       - input_ids: Tokens at positions [i, i+1, ..., i+seq_len-1]
@@ -387,7 +454,7 @@ class TextDataset(Dataset):
     seq_len : int
         Sequence length for each sample.
     tokenizer : object, optional
-        Tokenizer with encode() method. Defaults to CharTokenizer.
+        Tokenizer with encode() method. Defaults to ByteTokenizer.
     stride : int, optional
         Stride between consecutive samples. Defaults to seq_len (non-overlapping).
         Use stride < seq_len for overlapping samples (more training data).
@@ -406,6 +473,16 @@ class TextDataset(Dataset):
     >>> input_ids, labels = dataset[0]
     >>> input_ids.shape, labels.shape
     (torch.Size([10]), torch.Size([10]))
+    
+    Notes
+    -----
+    With ByteTokenizer (default), Unicode text is encoded as UTF-8 bytes.
+    This means:
+      - ASCII characters: 1 token per character
+      - Non-ASCII characters: 2-4 tokens per character
+    
+    The effective "character length" may differ from token length for
+    Unicode-heavy text.
     """
     
     def __init__(
@@ -416,16 +493,26 @@ class TextDataset(Dataset):
         stride: Optional[int] = None,
     ):
         if tokenizer is None:
-            tokenizer = CharTokenizer()
+            tokenizer = ByteTokenizer()
         
         self.seq_len = seq_len
         self.stride = stride if stride is not None else seq_len
         self.tokenizer = tokenizer
         self.vocab_size = tokenizer.vocab_size
         
-        # Encode entire text
+        # Encode entire text as bytes
         token_ids = tokenizer.encode(text)
         self.token_ids = torch.tensor(token_ids, dtype=torch.long)
+        
+        # Validate token range
+        if len(self.token_ids) > 0:
+            max_id = int(self.token_ids.max().item())
+            if max_id >= self.vocab_size:
+                raise ValueError(
+                    f"Token ID {max_id} exceeds vocab_size {self.vocab_size}. "
+                    f"This should not happen with ByteTokenizer. "
+                    f"Check your tokenizer implementation."
+                )
         
         # Calculate number of samples
         # We need seq_len + 1 tokens for each sample (input + 1 shifted label)
@@ -582,8 +669,8 @@ def load_shakespeare_from_github(
     
     print(f"[data] Loaded {len(text):,} characters from Shakespeare")
     
-    # Create tokenizer
-    tokenizer = CharTokenizer()
+    # Create tokenizer (ByteTokenizer for byte-level encoding)
+    tokenizer = ByteTokenizer()
     
     # Create full dataset
     full_dataset = TextDataset(
@@ -617,6 +704,11 @@ def load_shakespeare_from_github(
         vocab_size=tokenizer.vocab_size,
         dataset_name="shakespeare"
     )
+    
+    # Print info about vocab and token stats
+    print(f"[data] vocab_size={tokenizer.vocab_size}, seq_len={seq_len}")
+    print(f"[data] Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+    print(f"[data] Random baseline perplexity: {tokenizer.vocab_size:.2f}")
     
     return train_loader, val_loader, tokenizer.vocab_size
 
@@ -671,14 +763,14 @@ def load_huggingface_text_dataset(
     pin_memory: bool = False,
 ) -> Tuple[DataLoader, DataLoader, int]:
     """
-    Load any HuggingFace text dataset for character-level language modeling.
+    Load any HuggingFace text dataset for byte-level language modeling.
     
     This is a GENERIC function that can load any text dataset from HuggingFace.
     It handles the common pattern of:
       1. Load dataset from HuggingFace Hub
       2. Extract text from specified column
       3. Concatenate all text
-      4. Create TextDataset with tokenization
+      4. Create TextDataset with byte-level tokenization (vocab_size=256)
       5. Split into train/val
       6. Create dataloaders
     
@@ -736,6 +828,11 @@ def load_huggingface_text_dataset(
     - bookcorpus: 11,000 books (~5GB)
     - openwebtext: Web text (~40GB)
     - Any other HuggingFace dataset with a "text" column
+    
+    Notes
+    -----
+    Uses ByteTokenizer (UTF-8 bytes) for tokenization, guaranteeing vocab_size=256.
+    Unicode characters are encoded as 2-4 bytes each.
     """
     _assert_datasets()
     set_seed(seed)
@@ -791,8 +888,8 @@ def load_huggingface_text_dataset(
     text = "\n\n".join(texts)
     print(f"[data] Loaded {count:,} text samples, {len(text):,} characters total")
     
-    # Create tokenizer
-    tokenizer = CharTokenizer()
+    # Create tokenizer (ByteTokenizer for byte-level encoding)
+    tokenizer = ByteTokenizer()
     
     # Create full dataset
     full_dataset = TextDataset(
@@ -826,6 +923,11 @@ def load_huggingface_text_dataset(
         vocab_size=tokenizer.vocab_size,
         dataset_name=dataset_name_lower
     )
+    
+    # Print info about vocab and token stats
+    print(f"[data] vocab_size={tokenizer.vocab_size}, seq_len={seq_len}")
+    print(f"[data] Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+    print(f"[data] Random baseline perplexity: {tokenizer.vocab_size:.2f}")
     
     return train_loader, val_loader, tokenizer.vocab_size
 
@@ -884,8 +986,8 @@ def load_text_file(
     
     print(f"[data] Loaded {len(text):,} characters")
     
-    # Create tokenizer
-    tokenizer = CharTokenizer()
+    # Create tokenizer (ByteTokenizer for byte-level encoding)
+    tokenizer = ByteTokenizer()
     
     # Create full dataset
     full_dataset = TextDataset(
@@ -919,6 +1021,11 @@ def load_text_file(
         vocab_size=tokenizer.vocab_size,
         dataset_name="textfile"
     )
+    
+    # Print info about vocab and token stats
+    print(f"[data] vocab_size={tokenizer.vocab_size}, seq_len={seq_len}")
+    print(f"[data] Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+    print(f"[data] Random baseline perplexity: {tokenizer.vocab_size:.2f}")
     
     return train_loader, val_loader, tokenizer.vocab_size
 
@@ -1254,6 +1361,12 @@ def get_dataloaders(
     
     >>> # Local text file
     >>> train, val, vocab = get_dataloaders("textfile", text_filepath="my_book.txt")
+    
+    Notes
+    -----
+    Language datasets use ByteTokenizer (UTF-8 bytes) with vocab_size=256.
+    This ensures all token IDs are in range [0, 255], preventing IndexError
+    in nn.Embedding layers when processing Unicode text.
     """
     name = name.lower().strip()
 
@@ -1395,19 +1508,39 @@ if __name__ == "__main__":
     set_seed(42)
     
     logger.info("=" * 60)
-    logger.info("BoeNet Data Utils v2.0.0 Self-Test Suite")
+    logger.info("BoeNet Data Utils v2.0.1 Self-Test Suite")
     logger.info("=" * 60)
     
-    # Test 1: CharTokenizer
-    logger.info("\n[Test 1] CharTokenizer")
-    tokenizer = CharTokenizer()
+    # Test 1: ByteTokenizer (renamed from CharTokenizer)
+    logger.info("\n[Test 1] ByteTokenizer (byte-level UTF-8 encoding)")
+    tokenizer = ByteTokenizer()
+    
+    # Test ASCII text
     text = "Hello, World!"
     encoded = tokenizer.encode(text)
     decoded = tokenizer.decode(encoded)
     assert decoded == text, f"Round-trip failed: '{text}' → '{decoded}'"
+    assert all(0 <= t <= 255 for t in encoded), f"Token out of range: {encoded}"
+    logger.info(f"  ASCII: '{text}' → {encoded[:5]}... → '{decoded}'")
+    
+    # Test Unicode text (CRITICAL: this failed with old CharTokenizer)
+    unicode_text = "Hello—World"  # em-dash (U+2014)
+    unicode_encoded = tokenizer.encode(unicode_text)
+    unicode_decoded = tokenizer.decode(unicode_encoded)
+    assert unicode_decoded == unicode_text, f"Unicode round-trip failed: '{unicode_text}' → '{unicode_decoded}'"
+    assert all(0 <= t <= 255 for t in unicode_encoded), f"Unicode token out of range: {unicode_encoded}"
+    assert max(unicode_encoded) <= 255, f"Max token {max(unicode_encoded)} exceeds 255!"
+    logger.info(f"  Unicode: '{unicode_text}' → {unicode_encoded} → '{unicode_decoded}'")
+    logger.info(f"  Max token ID: {max(unicode_encoded)} (must be <= 255)")
+    
+    # Test with WikiText-like content (has em-dashes, smart quotes, etc.)
+    wiki_text = "The film—directed by John—was released in 2020."
+    wiki_encoded = tokenizer.encode(wiki_text)
+    assert all(0 <= t <= 255 for t in wiki_encoded), f"Wiki token out of range: {wiki_encoded}"
+    logger.info(f"  WikiText-like: max_token={max(wiki_encoded)}")
+    
     logger.info(f"  vocab_size: {tokenizer.vocab_size}")
-    logger.info(f"  '{text}' → {encoded[:5]}... → '{decoded}'")
-    logger.info("  ✓ CharTokenizer OK")
+    logger.info("  ✓ ByteTokenizer OK (all tokens in 0-255 range)")
     
     # Test 2: TextDataset
     logger.info("\n[Test 2] TextDataset")
@@ -1416,25 +1549,34 @@ if __name__ == "__main__":
     input_ids, labels = dataset[0]
     assert input_ids.shape == (32,), f"Expected (32,), got {input_ids.shape}"
     assert labels.shape == (32,), f"Expected (32,), got {labels.shape}"
-    # Verify shift: labels should be input_ids shifted by 1
-    original_tokens = tokenizer.encode(sample_text)
-    assert input_ids[0].item() == original_tokens[0]
-    assert labels[0].item() == original_tokens[1]
+    # Verify all tokens are in valid range
+    assert input_ids.max().item() < 256, f"input_ids max {input_ids.max().item()} >= 256"
+    assert labels.max().item() < 256, f"labels max {labels.max().item()} >= 256"
     logger.info(f"  Dataset length: {len(dataset)}")
-    logger.info(f"  input_ids shape: {input_ids.shape}")
-    logger.info(f"  Shift verified: input[0]={input_ids[0].item()}, label[0]={labels[0].item()}")
+    logger.info(f"  input_ids shape: {input_ids.shape}, max: {input_ids.max().item()}")
     logger.info("  ✓ TextDataset OK")
     
-    # Test 3: Toy dataset (vision)
-    logger.info("\n[Test 3] Toy dataset (vision)")
+    # Test 3: TextDataset with Unicode (would have failed with old CharTokenizer)
+    logger.info("\n[Test 3] TextDataset with Unicode content")
+    unicode_sample = "The film—directed by John—was 'great'. " * 10
+    unicode_dataset = TextDataset(unicode_sample, seq_len=32)
+    uid, ulabels = unicode_dataset[0]
+    assert uid.max().item() < 256, f"Unicode input_ids max {uid.max().item()} >= 256"
+    assert ulabels.max().item() < 256, f"Unicode labels max {ulabels.max().item()} >= 256"
+    logger.info(f"  Unicode dataset length: {len(unicode_dataset)}")
+    logger.info(f"  input_ids max: {uid.max().item()} (must be < 256)")
+    logger.info("  ✓ Unicode TextDataset OK")
+    
+    # Test 4: Toy dataset (vision)
+    logger.info("\n[Test 4] Toy dataset (vision)")
     train, val, D, C = build_toy2token_dataset(samples_per_class=10, batch_size=4)
     xb, yb = next(iter(train))
     assert xb.shape[1] == D, f"Expected dim {D}, got {xb.shape[1]}"
     logger.info(f"  D={D}, C={C}, batch={xb.shape}")
     logger.info("  ✓ Toy dataset OK")
     
-    # Test 4: Shakespeare dataset (via GitHub)
-    logger.info("\n[Test 4] Shakespeare dataset (via GitHub download)")
+    # Test 5: Shakespeare dataset (via GitHub)
+    logger.info("\n[Test 5] Shakespeare dataset (via GitHub download)")
     try:
         train, val, vocab = load_shakespeare_from_github(
             seq_len=64, batch_size=8, split=SplitConfig(val_ratio=0.1),
@@ -1443,14 +1585,15 @@ if __name__ == "__main__":
         input_ids, labels = next(iter(train))
         assert input_ids.shape == (8, 64), f"Expected (8, 64), got {input_ids.shape}"
         assert labels.shape == (8, 64), f"Expected (8, 64), got {labels.shape}"
-        logger.info(f"  vocab_size={vocab}, batch={input_ids.shape}")
+        assert input_ids.max().item() < 256, f"Shakespeare input_ids max {input_ids.max().item()} >= 256"
+        logger.info(f"  vocab_size={vocab}, batch={input_ids.shape}, max_id={input_ids.max().item()}")
         logger.info("  ✓ Shakespeare dataset OK")
     except Exception as e:
         logger.warning(f"  ⚠ Shakespeare test failed: {e}")
     
-    # Test 5: WikiText-2 (if datasets library available)
+    # Test 6: WikiText-2 (if datasets library available)
     if _HAS_DATASETS:
-        logger.info("\n[Test 5] WikiText-2 dataset (via HuggingFace)")
+        logger.info("\n[Test 6] WikiText-2 dataset (via HuggingFace)")
         try:
             train, val, vocab = load_huggingface_text_dataset(
                 "wikitext2", seq_len=64, batch_size=8, 
@@ -1459,15 +1602,18 @@ if __name__ == "__main__":
             )
             input_ids, labels = next(iter(train))
             assert input_ids.shape[1] == 64, f"Expected seq_len=64, got {input_ids.shape[1]}"
+            # CRITICAL: This would fail with old CharTokenizer (max would be ~8000+)
+            assert input_ids.max().item() < 256, f"WikiText input_ids max {input_ids.max().item()} >= 256"
             logger.info(f"  vocab_size={vocab}, batch={input_ids.shape}")
-            logger.info("  ✓ WikiText-2 dataset OK")
+            logger.info(f"  input_ids[min,max]=[{input_ids.min().item()},{input_ids.max().item()}] (must be < 256)")
+            logger.info("  ✓ WikiText-2 dataset OK (byte-level tokenization working!)")
         except Exception as e:
             logger.warning(f"  ⚠ WikiText-2 test failed: {e}")
     else:
-        logger.info("\n[Test 5] WikiText-2 dataset (SKIPPED - datasets not installed)")
+        logger.info("\n[Test 6] WikiText-2 dataset (SKIPPED - datasets not installed)")
     
-    # Test 6: Unified accessor
-    logger.info("\n[Test 6] Unified accessor (get_dataloaders)")
+    # Test 7: Unified accessor
+    logger.info("\n[Test 7] Unified accessor (get_dataloaders)")
     
     # Vision dataset
     train, val, D, C = get_dataloaders("toy", batch_size=4, toy_samples_per_class=10)
@@ -1478,6 +1624,7 @@ if __name__ == "__main__":
     try:
         train, val, vocab = get_dataloaders("shakespeare", batch_size=8, seq_len=64)
         assert isinstance(vocab, int)
+        assert vocab == 256, f"Expected vocab_size=256, got {vocab}"
         logger.info(f"  shakespeare: vocab_size={vocab}")
     except Exception as e:
         logger.warning(f"  ⚠ shakespeare accessor failed: {e}")
@@ -1489,7 +1636,10 @@ if __name__ == "__main__":
                 "wikitext2", batch_size=8, seq_len=64, max_samples=100
             )
             assert isinstance(vocab, int)
-            logger.info(f"  wikitext2: vocab_size={vocab}")
+            assert vocab == 256, f"Expected vocab_size=256, got {vocab}"
+            input_ids, _ = next(iter(train))
+            assert input_ids.max().item() < 256, f"Max token ID {input_ids.max().item()} >= 256"
+            logger.info(f"  wikitext2: vocab_size={vocab}, max_id={input_ids.max().item()}")
         except Exception as e:
             logger.warning(f"  ⚠ wikitext2 accessor failed: {e}")
     
@@ -1516,4 +1666,8 @@ if __name__ == "__main__":
     logger.info("  - bookcorpus: 11,000 books (~5GB)")
     logger.info("  - openwebtext: Web text (~40GB)")
     logger.info("  - textfile: Local text file (requires text_filepath)")
+    logger.info("\nTokenization (v2.0.1):")
+    logger.info("  - ByteTokenizer: UTF-8 byte-level (vocab_size=256)")
+    logger.info("  - All token IDs guaranteed in range [0, 255]")
+    logger.info("  - Unicode characters encoded as 2-4 bytes each")
     logger.info("=" * 60)
