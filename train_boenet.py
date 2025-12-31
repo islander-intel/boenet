@@ -1,9 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-train_boenet.py (v2.0.0 - Language Model)
+train_boenet.py (v2.0.1 - Language Model)
 
 Train BoeNet on WikiText-2/Shakespeare/TinyStories with REINFORCE Policy Gradients
+
+v2.0.1 Changes (Bug Fixes for K>0 Training)
+-------------------------------------------
+FIXED:
+  - Added NaN detection helper functions
+  - Added NaN checks after model forward pass
+  - Added separate gradient clipping for policy network (more aggressive)
+  - Added NaN gradient detection before optimizer.step()
+  - Added early stopping if too many NaN batches occur
+  - Added --policy_grad_clip command line argument
+
+The CUDA error "Assertion `0 <= p4 && p4 <= 1` failed" was caused by:
+  1. Policy network producing NaN due to gradient explosion
+  2. NaN propagating to torch.bernoulli() in model.py
+  3. GPU detecting invalid probability values
+
+These training script changes work in conjunction with fixes in:
+  - boenet/model.py v1.1.0 (probability clamping)
+  - boenet/utils/gating.py v2.1.0 (logit clamping)
+  - boenet/losses.py v1.1.0 (reward scaling)
 
 Converted from train_fmnist_bfs.py (Vision) to train_boenet.py (Language)
 --------------------------------------------------------------------------
@@ -34,7 +54,6 @@ UNCHANGED:
   - Multiple rollouts mechanism
   - Greedy threshold handling
   - Policy loss computation
-  - Gradient clipping
   - Learning rate scheduling
   - Checkpoint saving
   - Node counting and sparsity metrics
@@ -53,12 +72,14 @@ The greedy_threshold parameter controls inference sparsity:
   - threshold = 0.42-0.45: Balanced, partial expansion
   - threshold = 0.30-0.35: Aggressive, near-full expansion
 
-Training Loop (v2.0.0):
+Training Loop (v2.0.1):
   1. Forward: outputs, policy_loss, rewards, node_counts = model(x, labels=y, ...)
-  2. Language modeling loss: CE(outputs, y) where y is shifted input
-  3. Total loss: lm_loss + beta_policy * policy_loss
-  4. Single backward() flows gradients through both paths
-  5. Log: perplexity, policy loss, avg nodes/position, rewards
+  2. NaN check on outputs and policy_loss (v2.0.1)
+  3. Language modeling loss: CE(outputs, y) where y is shifted input
+  4. Total loss: lm_loss + beta_policy * policy_loss
+  5. Backward with NaN gradient detection (v2.0.1)
+  6. Separate gradient clipping for policy network (v2.0.1)
+  7. Log: perplexity, policy loss, avg nodes/position, rewards
 
 Metrics:
   - Perplexity = exp(cross_entropy_loss)
@@ -96,6 +117,9 @@ python3 train_boenet.py --dataset tinystories --epochs 5
 # Training on custom text file:
 python3 train_boenet.py --dataset textfile --text_filepath path/to/text.txt
 
+# Training with aggressive policy gradient clipping (for stability):
+python3 train_boenet.py --policy_grad_clip 0.25 --grad_clip 1.0
+
 Greedy Threshold Selection Guide:
 ---------------------------------
 The greedy_threshold parameter controls which grow decisions pass during
@@ -126,8 +150,8 @@ Available Datasets:
   textfile:    Custom local text file
 
 Author: BoeNet project (converted from BFSNet)
-Version: 2.0.0
-Date: 2025-12-22
+Version: 2.0.1
+Date: 2025-12-30
 """
 
 from __future__ import annotations
@@ -137,6 +161,7 @@ import time
 import json
 import math
 import argparse
+import logging
 from typing import Dict, List, Tuple, Any, Optional
 
 import torch
@@ -177,6 +202,95 @@ except Exception:
         q = prune_soft.view(-1).clamp(1e-8, 1 - 1e-8)
         r = torch.tensor(float(prior_keep_rate), device=q.device, dtype=q.dtype)
         return (q * (q.log() - r.log()) + (1 - q) * ((1 - q).log() - (1 - r).log())).mean()
+
+
+# --------------------------------------------------------------------------- #
+#                         Module-level logger (v2.0.1)                        #
+# --------------------------------------------------------------------------- #
+logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+#                      NaN Detection Helpers (v2.0.1)                         #
+# --------------------------------------------------------------------------- #
+
+def check_for_nan_in_model(model: nn.Module, step_name: str = "") -> bool:
+    """
+    Check model parameters for NaN values.
+    
+    Parameters
+    ----------
+    model : nn.Module
+        The model to check.
+    step_name : str
+        Identifier for logging (e.g., "batch_42").
+        
+    Returns
+    -------
+    bool
+        True if NaN detected, False otherwise.
+    """
+    for name, param in model.named_parameters():
+        if param is not None and torch.isnan(param).any():
+            nan_count = torch.isnan(param).sum().item()
+            logger.error(
+                f"[NaN DETECTED] {step_name} - Parameter '{name}' has {nan_count} NaN values!"
+            )
+            return True
+    return False
+
+
+def check_for_nan_in_gradients(model: nn.Module, step_name: str = "") -> bool:
+    """
+    Check model gradients for NaN values.
+    
+    Parameters
+    ----------
+    model : nn.Module
+        The model to check.
+    step_name : str
+        Identifier for logging (e.g., "batch_42").
+        
+    Returns
+    -------
+    bool
+        True if NaN gradient detected, False otherwise.
+    """
+    for name, param in model.named_parameters():
+        if param.grad is not None and torch.isnan(param.grad).any():
+            nan_count = torch.isnan(param.grad).sum().item()
+            logger.error(
+                f"[NaN GRADIENT] {step_name} - Parameter '{name}' has {nan_count} NaN gradients!"
+            )
+            return True
+    return False
+
+
+def check_tensor_for_nan(tensor: torch.Tensor, name: str, step_name: str = "") -> bool:
+    """
+    Check a tensor for NaN values.
+    
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        The tensor to check.
+    name : str
+        Name of the tensor for logging.
+    step_name : str
+        Identifier for logging.
+        
+    Returns
+    -------
+    bool
+        True if NaN detected, False otherwise.
+    """
+    if torch.isnan(tensor).any():
+        nan_count = torch.isnan(tensor).sum().item()
+        logger.warning(
+            f"[NaN TENSOR] {step_name} - Tensor '{name}' has {nan_count} NaN values!"
+        )
+        return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -238,6 +352,8 @@ def _flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         # v2.0.0 policy parameters
         "num_rollouts", "lambda_efficiency", "beta_entropy", "beta_policy",
         "greedy_threshold",
+        # v2.0.1 policy gradient clipping
+        "policy_grad_clip",
         # Pruning losses
         "prune_l1_weight", "prune_kl_weight", "prune_keep_rate",
         # Optimizer
@@ -253,7 +369,7 @@ def _flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     
     # Nested sections
     nested_map = {
-        "training": ["epochs", "lr", "weight_decay", "grad_clip", "seed"],
+        "training": ["epochs", "lr", "weight_decay", "grad_clip", "seed", "policy_grad_clip"],
         "model": ["hidden_dim", "embed_dim", "max_depth", "max_children", 
                   "no_sibling_embed", "greedy_threshold", "vocab_size"],
         "data": ["seq_len", "dataset", "stride", "batch_size", "val_ratio", "text_filepath"],
@@ -262,7 +378,7 @@ def _flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "save": ["save_path", "data_root"],
         "run": ["cpu", "pooling_mode"],
         "policy": ["num_rollouts", "lambda_efficiency", "beta_entropy", 
-                   "beta_policy", "greedy_threshold"],
+                   "beta_policy", "greedy_threshold", "policy_grad_clip"],
         "losses": ["prune_l1_weight", "prune_kl_weight", "prune_keep_rate"],
         "optimizer": ["opt", "momentum", "nesterov", "adamw_beta1", 
                       "adamw_beta2", "adamw_eps"],
@@ -343,12 +459,22 @@ def evaluate(
         # Forward pass (greedy inference)
         logits = model(input_ids)  # [B, seq_len, vocab_size]
         
+        # v2.0.1: Check for NaN in logits during evaluation
+        if torch.isnan(logits).any():
+            logger.warning("[Eval] NaN detected in logits. Skipping batch.")
+            continue
+        
         # Compute loss
         B, seq_len, V = logits.shape
         logits_flat = logits.view(-1, V)  # [B*seq_len, vocab_size]
         labels_flat = labels.view(-1)      # [B*seq_len]
         
         loss = F.cross_entropy(logits_flat, labels_flat, reduction='sum')
+        
+        # v2.0.1: Check for NaN in loss
+        if torch.isnan(loss):
+            logger.warning("[Eval] NaN detected in loss. Skipping batch.")
+            continue
         
         total_loss += loss.item()
         total_tokens += labels.numel()
@@ -367,6 +493,11 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     """
     Main training function for BoeNet language model.
     
+    v2.0.1 includes:
+    - NaN detection on outputs, policy_loss, and gradients
+    - Separate gradient clipping for policy network
+    - Early stopping on repeated NaN batches
+    
     Parameters
     ----------
     args : argparse.Namespace
@@ -379,8 +510,18 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     str
         Path to saved checkpoint.
     """
+    # Configure logging for training
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+    
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    
+    logger.info(f"[device] Using device: {device}")
+    if device.type == "cuda":
+        logger.info(f"[device] GPU: {torch.cuda.get_device_name(0)}")
     
     # ==========================================================================
     # WARNING: Greedy Threshold Mismatch Issue (same as BFSNet v2.0.0)
@@ -409,6 +550,29 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         print("     python3 boenet_training_matrix.py --config configs/threshold_sweep.yaml")
         print()
         print("See docs/architecture.md for detailed analysis.")
+        print("=" * 79 + "\n")
+    # ==========================================================================
+    
+    # ==========================================================================
+    # v2.0.1: K>0 Training Warning
+    # ==========================================================================
+    if args.max_children > 0:
+        print("\n" + "=" * 79)
+        print("ℹ️  INFO: Training with K>0 (BFS Tree Expansion)")
+        print("=" * 79)
+        print(f"  max_children (K) = {args.max_children}")
+        print(f"  max_depth        = {args.max_depth}")
+        print(f"  policy_grad_clip = {args.policy_grad_clip}")
+        print()
+        print("v2.0.1 includes stability fixes for K>0 training:")
+        print("  - Probability clamping in model.py")
+        print("  - Logit clamping in gating.py")
+        print("  - Reward scaling in losses.py")
+        print("  - Separate policy gradient clipping (this script)")
+        print()
+        print("If you still encounter CUDA assertion errors, try:")
+        print(f"  --policy_grad_clip {args.policy_grad_clip / 2}")
+        print(f"  --lr {args.lr / 2}")
         print("=" * 79 + "\n")
     # ==========================================================================
     
@@ -470,6 +634,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         f"λ_eff={args.lambda_efficiency}, β_ent={args.beta_entropy}, "
         f"β_policy={args.beta_policy}\n"
         f"      greedy_threshold={args.greedy_threshold} (inference)\n"
+        f"      policy_grad_clip={args.policy_grad_clip} (v2.0.1)\n"
         f"      pooling_mode={args.pooling_mode}\n"
         f"      pruning losses: L1*={args.prune_l1_weight}, "
         f"KL*={args.prune_kl_weight} (keep_rate={args.prune_keep_rate})"
@@ -528,6 +693,23 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     t0_total = time.perf_counter()
     
     # ==========================================================================
+    # v2.0.1: Identify policy parameters for separate gradient clipping
+    # ==========================================================================
+    policy_param_names = set()
+    policy_params = []
+    other_params = []
+    
+    for name, param in model.named_parameters():
+        if 'growth_policy' in name:
+            policy_param_names.add(name)
+            policy_params.append(param)
+        else:
+            other_params.append(param)
+    
+    logger.info(f"[v2.0.1] Policy parameters ({len(policy_params)}): {list(policy_param_names)}")
+    logger.info(f"[v2.0.1] Other parameters: {len(other_params)}")
+    
+    # ==========================================================================
     # Training Loop
     # ==========================================================================
     for epoch in range(1, args.epochs + 1):
@@ -546,6 +728,11 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         total_nodes_across_all_rollouts = 0
         positions_seen = 0
         
+        # v2.0.1: NaN tracking for early stopping
+        nan_batch_count = 0
+        max_nan_batches = max(len(train_loader) // 10, 5)  # Allow up to 10% NaN batches
+        skipped_batches = 0
+        
         if args.debug_node_counts:
             all_rollout_node_counts = []
         
@@ -555,15 +742,50 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             
             optimizer.zero_grad()
             
-            # v2.0.0 FORWARD (Language Model)
-            outputs, policy_loss, rewards, node_counts = model(
-                input_ids,
-                num_rollouts=args.num_rollouts,
-                lambda_efficiency=args.lambda_efficiency,
-                beta_entropy=args.beta_entropy,
-                labels=labels,
-            )
+            # ==================================================================
+            # v2.0.1 FORWARD with NaN detection
+            # ==================================================================
+            try:
+                outputs, policy_loss, rewards, node_counts = model(
+                    input_ids,
+                    num_rollouts=args.num_rollouts,
+                    lambda_efficiency=args.lambda_efficiency,
+                    beta_entropy=args.beta_entropy,
+                    labels=labels,
+                )
+            except RuntimeError as e:
+                if "CUDA" in str(e) or "assert" in str(e).lower():
+                    logger.error(f"[Batch {batch_idx}] CUDA error during forward: {e}")
+                    nan_batch_count += 1
+                    skipped_batches += 1
+                    if nan_batch_count > max_nan_batches:
+                        logger.error(f"[Epoch {epoch}] Too many errors ({nan_batch_count}). Stopping.")
+                        break
+                    continue
+                else:
+                    raise
+            
             # outputs: [B, seq_len, vocab_size]
+            
+            # ==================================================================
+            # v2.0.1: Check for NaN in outputs
+            # ==================================================================
+            if check_tensor_for_nan(outputs, "outputs", f"batch_{batch_idx}"):
+                logger.warning(f"[Batch {batch_idx}] NaN in outputs. Skipping batch.")
+                nan_batch_count += 1
+                skipped_batches += 1
+                if nan_batch_count > max_nan_batches:
+                    logger.error(f"[Epoch {epoch}] Too many NaN batches ({nan_batch_count}). Stopping.")
+                    break
+                continue
+            
+            # ==================================================================
+            # v2.0.1: Check for NaN in policy loss
+            # ==================================================================
+            if torch.isnan(policy_loss):
+                logger.warning(f"[Batch {batch_idx}] NaN policy loss. Using zero.")
+                policy_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                nan_batch_count += 1
             
             # Language modeling loss (cross-entropy)
             B, seq_len, V = outputs.shape
@@ -571,15 +793,72 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             labels_flat = labels.view(-1)          # [B*seq_len]
             lm_loss = F.cross_entropy(outputs_flat, labels_flat)
             
+            # ==================================================================
+            # v2.0.1: Check for NaN in LM loss
+            # ==================================================================
+            if torch.isnan(lm_loss):
+                logger.warning(f"[Batch {batch_idx}] NaN LM loss. Skipping batch.")
+                nan_batch_count += 1
+                skipped_batches += 1
+                if nan_batch_count > max_nan_batches:
+                    logger.error(f"[Epoch {epoch}] Too many NaN batches ({nan_batch_count}). Stopping.")
+                    break
+                continue
+            
             # Total loss
             total_loss_batch = lm_loss + args.beta_policy * policy_loss
             
             # Backward
             total_loss_batch.backward()
             
-            # Gradient clipping
+            # ==================================================================
+            # v2.0.1: Check for NaN in gradients BEFORE clipping
+            # ==================================================================
+            if check_for_nan_in_gradients(model, f"batch_{batch_idx}"):
+                logger.warning(f"[Batch {batch_idx}] NaN gradients. Zeroing and skipping.")
+                optimizer.zero_grad()
+                nan_batch_count += 1
+                skipped_batches += 1
+                if nan_batch_count > max_nan_batches:
+                    logger.error(f"[Epoch {epoch}] Too many NaN batches ({nan_batch_count}). Stopping.")
+                    break
+                continue
+            
+            # ==================================================================
+            # v2.0.1: Separate gradient clipping for policy network
+            # ==================================================================
             if args.grad_clip and args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                # Clip policy gradients more aggressively
+                if policy_params and args.policy_grad_clip > 0:
+                    policy_grad_norm = torch.nn.utils.clip_grad_norm_(
+                        policy_params, args.policy_grad_clip
+                    )
+                    if args.debug_node_counts and batch_idx == 0:
+                        logger.debug(f"[Batch {batch_idx}] Policy grad norm: {policy_grad_norm:.4f}")
+                
+                # Clip other gradients normally
+                if other_params:
+                    other_grad_norm = torch.nn.utils.clip_grad_norm_(
+                        other_params, args.grad_clip
+                    )
+                    if args.debug_node_counts and batch_idx == 0:
+                        logger.debug(f"[Batch {batch_idx}] Other grad norm: {other_grad_norm:.4f}")
+            
+            # ==================================================================
+            # v2.0.1: Final NaN check after clipping
+            # ==================================================================
+            has_nan_after_clip = False
+            for name, param in model.named_parameters():
+                if param.grad is not None and torch.isnan(param.grad).any():
+                    has_nan_after_clip = True
+                    break
+            
+            if has_nan_after_clip:
+                logger.warning(f"[Batch {batch_idx}] NaN still present after clipping. Skipping.")
+                optimizer.zero_grad()
+                nan_batch_count += 1
+                skipped_batches += 1
+                continue
             
             optimizer.step()
             
@@ -612,17 +891,38 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             if args.debug_node_counts:
                 all_rollout_node_counts.extend(node_counts)
         
+        # ==================================================================
+        # v2.0.1: Check if we need to stop early due to NaN
+        # ==================================================================
+        if nan_batch_count > max_nan_batches:
+            logger.error(f"[Epoch {epoch}] Stopping training due to too many NaN batches.")
+            break
+        
+        if skipped_batches > 0:
+            logger.warning(f"[Epoch {epoch}] Skipped {skipped_batches} batches due to NaN.")
+        
         # Scheduler step
         if scheduler is not None:
             scheduler.step()
         
         # Epoch metrics
-        train_loss = total_loss / max(1, total_tokens)
-        train_lm_loss = total_lm_loss / max(1, total_tokens)
-        train_policy_loss = total_policy_loss / max(1, total_tokens)
-        train_ppl = compute_perplexity(train_lm_loss)
+        if total_tokens > 0:
+            train_loss = total_loss / total_tokens
+            train_lm_loss = total_lm_loss / total_tokens
+            train_policy_loss = total_policy_loss / total_tokens
+            train_ppl = compute_perplexity(train_lm_loss)
+        else:
+            logger.error(f"[Epoch {epoch}] No tokens processed. All batches skipped.")
+            train_loss = float('inf')
+            train_lm_loss = float('inf')
+            train_policy_loss = float('inf')
+            train_ppl = float('inf')
         
-        avg_total_nodes_per_position = total_nodes_across_all_rollouts / max(1, positions_seen)
+        if positions_seen > 0:
+            avg_total_nodes_per_position = total_nodes_across_all_rollouts / positions_seen
+        else:
+            avg_total_nodes_per_position = 0.0
+        
         theoretical_max_total_per_position = theoretical_max_per_position * args.num_rollouts
         sparsity_ratio = avg_total_nodes_per_position / max(theoretical_max_total_per_position, 1)
         
@@ -641,7 +941,11 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             f"  (Sparsity: {sparsity_ratio:.2%} of theoretical max {theoretical_max_total_per_position} nodes)"
         )
         
-        if args.debug_node_counts:
+        # v2.0.1: Log NaN statistics
+        if nan_batch_count > 0:
+            print(f"  [v2.0.1] NaN batches this epoch: {nan_batch_count}, Skipped: {skipped_batches}")
+        
+        if args.debug_node_counts and all_rollout_node_counts:
             import statistics
             min_nodes = min(all_rollout_node_counts)
             max_nodes = max(all_rollout_node_counts)
@@ -654,6 +958,13 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         
         epoch_time = time.perf_counter() - t0
         epoch_times_s.append(float(epoch_time))
+        
+        # ==================================================================
+        # v2.0.1: Check model parameters for NaN at end of epoch
+        # ==================================================================
+        if check_for_nan_in_model(model, f"epoch_{epoch}_end"):
+            logger.error(f"[Epoch {epoch}] Model parameters contain NaN. Stopping training.")
+            break
     
     total_time_s = time.perf_counter() - t0_total
     
@@ -686,7 +997,9 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             "lambda_efficiency": args.lambda_efficiency,
             "beta_entropy": args.beta_entropy,
             "beta_policy": args.beta_policy,
-            "version": "2.0.0",
+            # v2.0.1 additions
+            "policy_grad_clip": args.policy_grad_clip,
+            "version": "2.0.1",
             "model_type": "language",
         },
         "training_meta": {
@@ -713,6 +1026,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     print(f"  dataset           = {args.dataset}")
     print(f"  lambda_efficiency = {args.lambda_efficiency}")
     print(f"  greedy_threshold  = {args.greedy_threshold}")
+    print(f"  policy_grad_clip  = {args.policy_grad_clip} (v2.0.1)")
     print(f"  best_val_ppl      = {best_val_ppl:.2f}")
     print()
     print("NEXT STEPS:")
@@ -742,7 +1056,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     print("4. Compare to random baseline:")
     print(f"   Random PPL = {random_ppl:.2f} (vocab_size)")
     print(f"   Your PPL   = {best_val_ppl:.2f}")
-    if best_val_ppl > 0:
+    if best_val_ppl > 0 and best_val_ppl < float('inf'):
         print(f"   Improvement: {(random_ppl / best_val_ppl):.2f}x better")
     print()
     print("EMPIRICAL FINDINGS:")
@@ -750,6 +1064,11 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     print("  • Policy learns grow_prob ≈ 0.44-0.45 regardless of λ value")
     print("  • Default threshold=0.5 typically results in root-only inference")
     print("  • Root-only still achieves reasonable PPL (language patterns learned)")
+    print()
+    print("v2.0.1 STABILITY NOTES:")
+    print("  • If training was unstable, try reducing --policy_grad_clip")
+    print("  • The fixes in model.py, gating.py, and losses.py should prevent")
+    print("    CUDA assertion failures from invalid probabilities")
     print()
     print("See docs/architecture.md for complete analysis and recommendations.")
     print("=" * 79 + "\n")
@@ -783,12 +1102,13 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             "lambda_efficiency": float(args.lambda_efficiency),
             "beta_entropy": float(args.beta_entropy),
             "beta_policy": float(args.beta_policy),
+            "policy_grad_clip": float(args.policy_grad_clip),
         },
         "results": {
-            "best_val_loss": float(best_val_loss),
-            "best_val_ppl": float(best_val_ppl),
+            "best_val_loss": float(best_val_loss) if best_val_loss != float('inf') else None,
+            "best_val_ppl": float(best_val_ppl) if best_val_ppl != float('inf') else None,
             "best_epoch": int(best_epoch),
-            "final_val_ppl": float(val_ppl),
+            "final_val_ppl": float(val_ppl) if 'val_ppl' in dir() and val_ppl != float('inf') else None,
             "random_baseline_ppl": float(random_ppl),
         },
         "time": {
@@ -799,6 +1119,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         "artifacts": {
             "checkpoint": args.save_path,
         },
+        "version": "2.0.1",
     }
     
     try:
@@ -815,7 +1136,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Train BoeNet v2.0.0 Language Model with REINFORCE policy gradients",
+        description="Train BoeNet v2.0.1 Language Model with REINFORCE policy gradients",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -842,6 +1163,12 @@ python3 train_boenet.py \\
     --lambda_efficiency 0.05 \\
     --greedy_threshold 0.42 \\
     --epochs 20
+
+# v2.0.1: Training with custom policy gradient clipping:
+python3 train_boenet.py \\
+    --max_children 3 \\
+    --policy_grad_clip 0.25 \\
+    --grad_clip 1.0
 
 Available Datasets:
 -------------------
@@ -871,6 +1198,12 @@ WORKFLOW:
   2. Run: python3 infer_boenet.py --ckpt <path> --debug_policy
   3. Note the mean_grow_prob from output
   4. Retrain with: --greedy_threshold <mean_grow_prob - 0.03>
+
+v2.0.1 Stability Notes:
+-----------------------
+  - Added --policy_grad_clip for separate policy gradient clipping
+  - Added NaN detection throughout training loop
+  - Works with fixed model.py, gating.py, losses.py
 
 See docs/architecture.md for detailed analysis.
         """
@@ -942,6 +1275,12 @@ See docs/architecture.md for detailed analysis.
                         "Recommended: 0.42-0.45 based on learned grow_prob. "
                         "Run with --debug_policy after training to measure optimal value.")
     
+    # v2.0.1: Policy gradient clipping
+    p.add_argument("--policy_grad_clip", type=float, default=0.5,
+                   help="Gradient clipping specifically for policy network (default: 0.5). "
+                        "Policy gradients can be larger than LM gradients due to REINFORCE variance. "
+                        "Lower values (0.25) may help stability for K>0 training.")
+    
     # Pruning losses
     p.add_argument("--prune_l1_weight", type=float, default=0.0,
                    help="Weight for L1 pruning loss")
@@ -958,7 +1297,7 @@ See docs/architecture.md for detailed analysis.
     p.add_argument("--weight_decay", type=float, default=0.0,
                    help="Weight decay")
     p.add_argument("--grad_clip", type=float, default=1.0,
-                   help="Gradient clipping norm (0 to disable)")
+                   help="Gradient clipping norm for non-policy parameters (0 to disable)")
     
     # SGD-specific
     p.add_argument("--momentum", type=float, default=0.9,

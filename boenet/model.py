@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-boenet/model.py (v1.0.0 - Language Model)
+boenet/model.py (v1.1.0 - Language Model)
 
 BoeNet: BFS-Inspired Language Model with REINFORCE Policy Gradients
+
+v1.1.0 Changes (Bug Fixes for K>0 Training)
+-------------------------------------------
+FIXED:
+  - Added torch.clamp() on grow_prob before Bernoulli sampling (prevents CUDA assertion)
+  - Added NaN detection and replacement in _rollout() method
+  - Added gradient-safe log probability computation
+  - Added numerical stability guards throughout
+
+The CUDA error "Assertion `0 <= p4 && p4 <= 1` failed" was caused by:
+  1. Policy network producing NaN due to gradient explosion
+  2. NaN propagating to torch.bernoulli() which requires probs in [0, 1]
+  3. GPU detecting invalid probability values
 
 Converted from BFSNet v2.0.0 (Vision) to BoeNet v1.0.0 (Language)
 -----------------------------------------------------------------
@@ -29,7 +42,7 @@ UNCHANGED:
   - Greedy threshold mechanism
   - All utility functions
 
-Architecture Overview (v1.0.0)
+Architecture Overview (v1.1.0)
 ------------------------------
 Training:
   1. Input: [B, seq_len] token IDs
@@ -82,8 +95,8 @@ Usage Examples
 >>> logits = model(x)  # [B, seq_len, vocab_size]
 
 Author: BoeNet project (converted from BFSNet)
-Version: 1.0.0
-Date: 2025-12-22
+Version: 1.1.0
+Date: 2025-12-30
 """
 
 from __future__ import annotations
@@ -101,6 +114,15 @@ from boenet.utils.gating import GrowthPolicyNet, ScalarGate, ThresholdPruner
 
 # Module-level logger
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# NUMERICAL STABILITY CONSTANTS (v1.1.0)
+# =============================================================================
+# These constants prevent CUDA assertion failures from invalid probabilities
+PROB_CLAMP_MIN = 1e-7      # Minimum probability value (prevents log(0))
+PROB_CLAMP_MAX = 1.0 - 1e-7  # Maximum probability value (prevents log(1-1)=log(0))
+LOG_PROB_CLAMP_MIN = -20.0  # Minimum log probability (prevents -inf)
+LOG_PROB_CLAMP_MAX = 0.0    # Maximum log probability (log(1) = 0)
 
 # Safe scatter-add (unchanged from BFSNet)
 try:
@@ -125,18 +147,142 @@ except Exception:
         return dst
 
 
+# =============================================================================
+# HELPER FUNCTIONS (v1.1.0)
+# =============================================================================
+
+def _check_for_nan(tensor: torch.Tensor, name: str, replace_value: float = 0.5) -> torch.Tensor:
+    """
+    Check tensor for NaN values and replace them with a safe default.
+    
+    This prevents NaN propagation through the model, which would otherwise
+    cause CUDA assertion failures when NaN reaches torch.bernoulli().
+    
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Tensor to check.
+    name : str
+        Name of tensor for logging.
+    replace_value : float, default=0.5
+        Value to replace NaN with (0.5 is neutral for Bernoulli).
+        
+    Returns
+    -------
+    torch.Tensor
+        Tensor with NaN values replaced.
+    """
+    if torch.isnan(tensor).any():
+        nan_count = torch.isnan(tensor).sum().item()
+        logger.warning(
+            f"[NaN DETECTED] {name} contains {nan_count} NaN values. "
+            f"Replacing with {replace_value}. This indicates gradient explosion - "
+            f"consider reducing learning rate or increasing gradient clipping."
+        )
+        tensor = torch.where(torch.isnan(tensor), torch.full_like(tensor, replace_value), tensor)
+    return tensor
+
+
+def _safe_clamp_prob(prob: torch.Tensor, name: str = "prob") -> torch.Tensor:
+    """
+    Safely clamp probability values to valid range [PROB_CLAMP_MIN, PROB_CLAMP_MAX].
+    
+    This is CRITICAL for preventing CUDA assertion failures.
+    The error "Assertion `0 <= p4 && p4 <= 1` failed" occurs when
+    torch.bernoulli() receives probabilities outside [0, 1].
+    
+    Parameters
+    ----------
+    prob : torch.Tensor
+        Probability tensor (expected to be in [0, 1] but may have numerical issues).
+    name : str
+        Name for logging purposes.
+        
+    Returns
+    -------
+    torch.Tensor
+        Clamped probability tensor guaranteed to be in [PROB_CLAMP_MIN, PROB_CLAMP_MAX].
+    """
+    # First check for NaN
+    prob = _check_for_nan(prob, name, replace_value=0.5)
+    
+    # Check for values outside [0, 1] before clamping (for debugging)
+    if prob.numel() > 0:
+        min_val = prob.min().item()
+        max_val = prob.max().item()
+        if min_val < 0.0 or max_val > 1.0:
+            logger.warning(
+                f"[PROB OUT OF RANGE] {name} has values outside [0,1]: "
+                f"min={min_val:.6f}, max={max_val:.6f}. Clamping to valid range."
+            )
+    
+    # Clamp to valid range
+    return prob.clamp(PROB_CLAMP_MIN, PROB_CLAMP_MAX)
+
+
+def _safe_log_prob(prob: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    """
+    Compute log probability for Bernoulli action in a numerically stable way.
+    
+    For action a ∈ {0, 1} and probability p:
+        log_prob = a * log(p) + (1-a) * log(1-p)
+    
+    This function handles edge cases:
+        - p very close to 0 or 1
+        - NaN values in p
+        - Numerical underflow in log
+    
+    Parameters
+    ----------
+    prob : torch.Tensor
+        Probability of action=1, shape [...].
+    action : torch.Tensor
+        Sampled action (0 or 1), same shape as prob.
+        
+    Returns
+    -------
+    torch.Tensor
+        Log probability of the action, clamped to prevent -inf.
+    """
+    # Ensure probability is in valid range
+    p = prob.clamp(PROB_CLAMP_MIN, PROB_CLAMP_MAX)
+    
+    # Compute log probabilities safely
+    log_p = torch.log(p)
+    log_1_minus_p = torch.log(1.0 - p)
+    
+    # Clamp log probabilities to prevent -inf
+    log_p = log_p.clamp(min=LOG_PROB_CLAMP_MIN)
+    log_1_minus_p = log_1_minus_p.clamp(min=LOG_PROB_CLAMP_MIN)
+    
+    # Compute log probability of action
+    log_prob = action * log_p + (1.0 - action) * log_1_minus_p
+    
+    # Final clamp and NaN check
+    log_prob = log_prob.clamp(min=LOG_PROB_CLAMP_MIN, max=LOG_PROB_CLAMP_MAX)
+    log_prob = _check_for_nan(log_prob, "log_prob", replace_value=LOG_PROB_CLAMP_MIN)
+    
+    return log_prob
+
+
 # --------------------------------------------------------------------------- #
 #                                   Model                                     #
 # --------------------------------------------------------------------------- #
 
 class BoeNet(nn.Module):
     """
-    BFS-Inspired Language Model with REINFORCE Policy Gradients (v1.0.0).
+    BFS-Inspired Language Model with REINFORCE Policy Gradients (v1.1.0).
     
     This model performs breadth-first expansion where each node can spawn
     0 to K children based on learned binary growth policies. The policies
     are trained via REINFORCE to maximize a reward that balances language
     modeling performance and computational efficiency.
+    
+    v1.1.0 FIXES:
+    - Added probability clamping before torch.bernoulli() to prevent CUDA assertion
+    - Added NaN detection and replacement throughout _rollout()
+    - Added gradient-safe log probability computation
+    - Added numerical stability constants
     
     Parameters
     ----------
@@ -373,6 +519,11 @@ class BoeNet(nn.Module):
         This is the core BFS expansion - IDENTICAL to BFSNet.
         The only difference is h0 comes from embedding instead of root_fc.
         
+        v1.1.0 FIXES:
+        - Added probability clamping before torch.bernoulli()
+        - Added NaN detection on hidden states and probabilities
+        - Added gradient-safe log probability computation
+        
         Parameters
         ----------
         h0 : torch.Tensor
@@ -396,6 +547,11 @@ class BoeNet(nn.Module):
             print(f"\n[DEBUG _rollout] Starting rollout: N={N}, greedy={greedy}")
             if greedy:
                 print(f"[DEBUG _rollout] Greedy threshold: {self.greedy_threshold:.4f}")
+        
+        # =======================================================================
+        # v1.1.0: Check h0 for NaN before starting
+        # =======================================================================
+        h0 = _check_for_nan(h0, "h0 (root hidden states)")
         
         # Accumulators
         agg_sum = h0.new_zeros(N, self.hidden_dim)
@@ -424,6 +580,11 @@ class BoeNet(nn.Module):
                 Np = parent_idx.numel()
                 if Np == 0:
                     continue
+                
+                # =============================================================
+                # v1.1.0: Check parent_h for NaN
+                # =============================================================
+                parent_h = _check_for_nan(parent_h, f"parent_h (depth={depth}, group={parent_group_idx})")
                 
                 if self._debug:
                     print(f"[DEBUG _rollout]   Parent group {parent_group_idx}: {Np} parents")
@@ -458,12 +619,21 @@ class BoeNet(nn.Module):
                 # ============================================================
                 for j in range(self.max_children):
                     # Get grow probability from policy
-                    grow_prob = self.growth_policy(act_h, depth)  # [Na, 1]
+                    grow_prob_raw = self.growth_policy(act_h, depth)  # [Na, 1]
+                    
+                    # ==========================================================
+                    # v1.1.0 FIX: CLAMP PROBABILITY TO VALID RANGE
+                    # This prevents CUDA assertion "0 <= p4 && p4 <= 1" failure
+                    # ==========================================================
+                    grow_prob = _safe_clamp_prob(grow_prob_raw, name=f"grow_prob (depth={depth}, child={j})")
                     
                     if self._debug and parent_group_idx == 0 and j == 0:
                         prob_values = grow_prob.squeeze(-1).detach().cpu()
+                        raw_values = grow_prob_raw.squeeze(-1).detach().cpu()
                         print(f"[DEBUG _rollout]     Child {j} grow_prob stats:")
-                        print(f"[DEBUG _rollout]       mean={prob_values.mean():.4f}, "
+                        print(f"[DEBUG _rollout]       raw: mean={raw_values.mean():.4f}, "
+                              f"min={raw_values.min():.4f}, max={raw_values.max():.4f}")
+                        print(f"[DEBUG _rollout]       clamped: mean={prob_values.mean():.4f}, "
                               f"min={prob_values.min():.4f}, max={prob_values.max():.4f}")
                     
                     if greedy:
@@ -478,15 +648,16 @@ class BoeNet(nn.Module):
                                   f"(threshold {self.greedy_threshold:.4f}, "
                                   f"{above_thresh}/{Na} above)")
                     else:
-                        # Stochastic: Sample from Bernoulli
+                        # =======================================================
+                        # v1.1.0 FIX: Stochastic sampling with clamped probability
+                        # grow_prob is already clamped by _safe_clamp_prob above
+                        # =======================================================
                         action = torch.bernoulli(grow_prob)
                         
-                        # Log probability for REINFORCE
-                        p_clamped = grow_prob.clamp(1e-8, 1 - 1e-8)
-                        log_p = (
-                            action * torch.log(p_clamped)
-                            + (1 - action) * torch.log(1 - p_clamped)
-                        )
+                        # =======================================================
+                        # v1.1.0 FIX: Gradient-safe log probability computation
+                        # =======================================================
+                        log_p = _safe_log_prob(grow_prob, action)
                         log_probs_list.append(log_p.squeeze(-1))  # [Na]
                         
                         if self._debug:
@@ -514,6 +685,11 @@ class BoeNet(nn.Module):
                     # *** ONLY NOW do we compute the child ***
                     child_h = F.relu(self.child_fc(h_in))  # [Ng, H]
                     
+                    # ==========================================================
+                    # v1.1.0: Check child_h for NaN
+                    # ==========================================================
+                    child_h = _check_for_nan(child_h, f"child_h (depth={depth}, child={j})")
+                    
                     if self._debug:
                         print(f"[DEBUG _rollout]     Child {j}: CREATED {child_h.size(0)} nodes")
                     
@@ -531,16 +707,32 @@ class BoeNet(nn.Module):
                     print(f"[DEBUG _rollout] Frontier empty, stopping at depth {depth}")
                 break
         
+        # =======================================================================
+        # v1.1.0: Check aggregated sum for NaN before pooling
+        # =======================================================================
+        agg_sum = _check_for_nan(agg_sum, "agg_sum (before pooling)")
+        
         # Final pooling and output projection
         pooled = self._pool(agg_sum, agg_count)
+        
+        # v1.1.0: Check pooled for NaN
+        pooled = _check_for_nan(pooled, "pooled (after pooling)")
+        
         output = self.output_fc(pooled)  # [N, vocab_size]
+        
+        # v1.1.0: Check output for NaN
+        output = _check_for_nan(output, "output (final logits)")
         
         # Concatenate log probs if not greedy
         log_probs = torch.cat(log_probs_list) if len(log_probs_list) > 0 else None
         
         if self._debug:
             print(f"[DEBUG _rollout] Final node count: {node_count}")
-            print(f"[DEBUG _rollout] Output shape: {output.shape}\n")
+            print(f"[DEBUG _rollout] Output shape: {output.shape}")
+            if log_probs is not None:
+                print(f"[DEBUG _rollout] Log probs: shape={log_probs.shape}, "
+                      f"min={log_probs.min():.4f}, max={log_probs.max():.4f}")
+            print()
         
         return output, log_probs, node_count
     
@@ -564,6 +756,11 @@ class BoeNet(nn.Module):
         We use NEGATIVE cross-entropy because:
             - Lower loss = better model = higher reward
             - REINFORCE maximizes expected reward
+        
+        v1.1.0 CHANGES:
+        - Added reward scaling to prevent gradient explosion
+        - Added NaN detection in rewards
+        - Clamped efficiency penalty to reasonable range
         
         Parameters
         ----------
@@ -605,6 +802,16 @@ class BoeNet(nn.Module):
             # Cross-entropy loss (lower is better)
             ce_loss = F.cross_entropy(out, labels_flat, reduction='mean')
             
+            # =================================================================
+            # v1.1.0: Check for NaN/Inf in CE loss
+            # =================================================================
+            if torch.isnan(ce_loss) or torch.isinf(ce_loss):
+                logger.warning(
+                    f"[REWARD] Rollout {rollout_idx}: CE loss is NaN/Inf ({ce_loss.item()}). "
+                    f"Using default penalty value."
+                )
+                ce_loss = torch.tensor(10.0, device=out.device, dtype=out.dtype)
+            
             # Reward component: NEGATIVE loss (so higher reward = lower loss)
             # Typical CE loss for language models: 2-5 (untrained) → 1-2 (trained)
             # We negate so that reward increases as model improves
@@ -613,16 +820,32 @@ class BoeNet(nn.Module):
             # Efficiency penalty: nodes_used / max_nodes
             # Normalize by total positions, not just batch_size
             nodes_per_position = nodes / num_positions
-            efficiency_penalty = lambda_efficiency * (nodes_per_position / float(max_nodes_per_position))
+            efficiency_ratio = nodes_per_position / float(max_nodes_per_position)
+            
+            # =================================================================
+            # v1.1.0: Clamp efficiency ratio to [0, 1] to prevent extreme penalties
+            # =================================================================
+            efficiency_ratio = min(max(efficiency_ratio, 0.0), 1.0)
+            efficiency_penalty = lambda_efficiency * efficiency_ratio
             
             # Combined reward
             reward = reward_accuracy - efficiency_penalty
-            rewards.append(reward)
+            
+            # =================================================================
+            # v1.1.0: Scale reward to prevent gradient explosion
+            # Typical reward range: [-10, 0] -> scale to [-1, 0]
+            # =================================================================
+            # Note: We scale by dividing by a constant to keep rewards in a
+            # more stable range. This prevents the policy loss from exploding.
+            reward_scale = 5.0  # Typical CE loss magnitude
+            reward_scaled = reward / reward_scale
+            
+            rewards.append(reward_scaled)
             
             # Debug logging
             if self._debug and rollout_idx == 0:
                 print("\n" + "=" * 79)
-                print("REWARD COMPUTATION DEBUG (Rollout 0) - Language Model")
+                print("REWARD COMPUTATION DEBUG (Rollout 0) - Language Model v1.1.0")
                 print("=" * 79)
                 print(f"Batch size:               {batch_size}")
                 print(f"Sequence length:          {seq_len}")
@@ -632,10 +855,12 @@ class BoeNet(nn.Module):
                 print(f"Total nodes:              {nodes}")
                 print(f"Nodes per position:       {nodes_per_position:.2f}")
                 print(f"Max nodes per position:   {max_nodes_per_position}")
-                print(f"Efficiency fraction:      {nodes_per_position / float(max_nodes_per_position):.4f}")
+                print(f"Efficiency ratio:         {efficiency_ratio:.4f}")
                 print(f"Lambda efficiency:        {lambda_efficiency:.4f}")
                 print(f"Efficiency penalty:       {efficiency_penalty:.6f}")
-                print(f"Final reward:             {reward.item():.6f}")
+                print(f"Raw reward:               {reward.item():.6f}")
+                print(f"Reward scale factor:      {reward_scale}")
+                print(f"Scaled reward:            {reward_scaled.item():.6f}")
                 print("=" * 79 + "\n")
         
         return torch.stack(rewards)  # [num_rollouts]
@@ -650,6 +875,11 @@ class BoeNet(nn.Module):
         Compute REINFORCE policy loss with baseline and entropy bonus.
         
         IDENTICAL to BFSNet - the policy learning is input-agnostic.
+        
+        v1.1.0 CHANGES:
+        - Added gradient scaling to prevent explosion
+        - Added NaN detection in policy loss
+        - Clamped advantages to reasonable range
         
         Parameters
         ----------
@@ -674,24 +904,64 @@ class BoeNet(nn.Module):
         # Baseline (reduces variance)
         baseline = rewards.mean()
         
-        policy_loss = 0.0
-        total_entropy = 0.0
+        policy_loss = torch.tensor(0.0, device=rewards.device, dtype=rewards.dtype)
+        total_entropy = torch.tensor(0.0, device=rewards.device, dtype=rewards.dtype)
+        total_decisions = 0
         
         for log_p, reward in zip(valid_log_probs, rewards):
+            # =================================================================
+            # v1.1.0: Check log_p for NaN
+            # =================================================================
+            if torch.isnan(log_p).any():
+                nan_count = torch.isnan(log_p).sum().item()
+                logger.warning(
+                    f"[POLICY LOSS] log_p contains {nan_count} NaN values. Skipping this rollout."
+                )
+                continue
+            
             # Advantage
             advantage = reward - baseline
             
+            # =================================================================
+            # v1.1.0: Clamp advantage to prevent extreme gradients
+            # Typical advantage range after reward scaling: [-0.5, 0.5]
+            # =================================================================
+            advantage_clamped = advantage.clamp(-2.0, 2.0)
+            
             # REINFORCE gradient
-            policy_loss = policy_loss - (log_p * advantage).sum()
+            # Negative because we minimize loss (= maximize reward)
+            policy_loss = policy_loss - (log_p * advantage_clamped).sum()
             
             # Entropy bonus
-            p = torch.exp(log_p).clamp(1e-8, 1 - 1e-8)
-            entropy = -(p * p.log() + (1 - p) * (1 - p).log())
+            # For Bernoulli: H = -p*log(p) - (1-p)*log(1-p)
+            # We have log_p = log(p) for action=1, log(1-p) for action=0
+            # Approximate entropy using the log probs
+            p = torch.exp(log_p).clamp(PROB_CLAMP_MIN, PROB_CLAMP_MAX)
+            entropy = -(p * torch.log(p) + (1 - p) * torch.log(1 - p))
+            
+            # Check for NaN in entropy
+            entropy = _check_for_nan(entropy, "entropy", replace_value=0.0)
+            
             total_entropy = total_entropy + entropy.sum()
+            total_decisions += log_p.numel()
         
-        # Average entropy across rollouts
-        avg_entropy = total_entropy / len(valid_log_probs)
-        policy_loss = policy_loss - beta_entropy * avg_entropy
+        # =================================================================
+        # v1.1.0: Average entropy across all decisions, not rollouts
+        # =================================================================
+        if total_decisions > 0:
+            avg_entropy = total_entropy / total_decisions
+        else:
+            avg_entropy = torch.tensor(0.0, device=rewards.device)
+        
+        # Subtract entropy bonus (we want to maximize entropy = minimize -entropy)
+        policy_loss = policy_loss - beta_entropy * avg_entropy * total_decisions
+        
+        # =================================================================
+        # v1.1.0: Check final policy loss for NaN
+        # =================================================================
+        if torch.isnan(policy_loss):
+            logger.warning("[POLICY LOSS] Final policy loss is NaN. Returning zero loss.")
+            return torch.tensor(0.0, device=rewards.device, requires_grad=True)
         
         return policy_loss
     
@@ -749,6 +1019,11 @@ class BoeNet(nn.Module):
         # Project to hidden_dim (creates root nodes): [B*seq_len, hidden_dim]
         h0 = F.relu(self.embed_proj(embedded_flat))
         
+        # =======================================================================
+        # v1.1.0: Check h0 for NaN after projection
+        # =======================================================================
+        h0 = _check_for_nan(h0, "h0 (after embed_proj)")
+        
         # ====================================================================
         # BFS EXPANSION (Unchanged from BFSNet)
         # ====================================================================
@@ -756,7 +1031,7 @@ class BoeNet(nn.Module):
             # Inference: single greedy rollout
             if self._debug:
                 print("\n" + "=" * 79)
-                print("INFERENCE MODE (Greedy Rollout) - Language Model")
+                print("INFERENCE MODE (Greedy Rollout) - Language Model v1.1.0")
                 print(f"Batch size: {B}, Sequence length: {seq_len}")
                 print(f"Greedy Threshold: {self.greedy_threshold:.4f}")
                 print("=" * 79)
@@ -777,7 +1052,7 @@ class BoeNet(nn.Module):
         
         if self._debug:
             print("\n" + "=" * 79)
-            print(f"TRAINING MODE ({num_rollouts} Rollouts) - Language Model")
+            print(f"TRAINING MODE ({num_rollouts} Rollouts) - Language Model v1.1.0")
             print(f"Batch size: {B}, Sequence length: {seq_len}")
             print(f"Lambda Efficiency: {lambda_efficiency:.4f}")
             print("=" * 79)
@@ -798,11 +1073,21 @@ class BoeNet(nn.Module):
         # Average outputs for loss computation: [B*seq_len, vocab_size]
         avg_outputs_flat = torch.stack(all_outputs).mean(dim=0)
         
+        # =======================================================================
+        # v1.1.0: Check averaged outputs for NaN
+        # =======================================================================
+        avg_outputs_flat = _check_for_nan(avg_outputs_flat, "avg_outputs_flat")
+        
         # Compute rewards
         rewards = self._compute_rewards(
             all_outputs, all_node_counts, labels,
             lambda_efficiency, B, seq_len
         )
+        
+        # =======================================================================
+        # v1.1.0: Check rewards for NaN
+        # =======================================================================
+        rewards = _check_for_nan(rewards, "rewards", replace_value=-1.0)
         
         # Compute policy loss
         policy_loss = self._compute_policy_loss(
@@ -904,7 +1189,7 @@ class BoeNet(nn.Module):
     def summary(self) -> str:
         """Generate human-readable model configuration summary."""
         lines = [
-            "BoeNet v1.0.0 - Language Model (",
+            "BoeNet v1.1.0 - Language Model (",
             f"  vocab_size={self.vocab_size}, embed_dim={self.embed_dim}, hidden_dim={self.hidden_dim},",
             f"  max_depth={self.max_depth}, max_children={self.max_children},",
             f"  greedy_threshold={self.greedy_threshold:.4f},",
@@ -938,7 +1223,7 @@ if __name__ == "__main__":
     hidden_dim = 128
     
     logger.info("=" * 60)
-    logger.info("BoeNet v1.0.0 Self-Test Suite (Language Model)")
+    logger.info("BoeNet v1.1.0 Self-Test Suite (Language Model)")
     logger.info("=" * 60)
     
     # Test 1: Inference mode
@@ -959,8 +1244,8 @@ if __name__ == "__main__":
     logger.info(f"  Parameters: {model.num_parameters():,}")
     logger.info("  ✓ Inference mode OK")
     
-    # Test 2: Training mode
-    logger.info("\n[Test 2] Training mode (multiple rollouts)")
+    # Test 2: Training mode with K=3 (the problematic case)
+    logger.info("\n[Test 2] Training mode with K=3 (BFS tree expansion)")
     model.train()
     y = torch.randint(0, vocab_size, (B, seq_len))  # Target tokens
     outputs, policy_loss, rewards, node_counts = model(
@@ -975,7 +1260,7 @@ if __name__ == "__main__":
     logger.info(f"  Policy loss: {policy_loss.item():.4f}")
     logger.info(f"  Rewards: {[f'{r:.4f}' for r in rewards.tolist()]}")
     logger.info(f"  Node counts: {node_counts}")
-    logger.info("  ✓ Training mode OK")
+    logger.info("  ✓ Training mode with K=3 OK")
     
     # Test 3: Gradient flow
     logger.info("\n[Test 3] Gradient flow")
@@ -996,8 +1281,29 @@ if __name__ == "__main__":
     logger.info(f"  growth_policy gradient norm: {policy_grad_norm:.6f}")
     logger.info("  ✓ Gradient flow OK")
     
-    # Test 4: Text generation
-    logger.info("\n[Test 4] Text generation")
+    # Test 4: NaN detection (v1.1.0 feature)
+    logger.info("\n[Test 4] NaN detection (v1.1.0 feature)")
+    # Create a tensor with NaN and test the helper function
+    test_tensor = torch.tensor([1.0, float('nan'), 3.0])
+    fixed_tensor = _check_for_nan(test_tensor, "test_tensor", replace_value=0.0)
+    assert not torch.isnan(fixed_tensor).any(), "NaN should be replaced"
+    assert fixed_tensor[1].item() == 0.0, f"Expected 0.0, got {fixed_tensor[1].item()}"
+    logger.info("  ✓ NaN detection OK")
+    
+    # Test 5: Probability clamping (v1.1.0 feature)
+    logger.info("\n[Test 5] Probability clamping (v1.1.0 feature)")
+    # Test with out-of-range probabilities
+    bad_probs = torch.tensor([-0.1, 0.5, 1.1, float('nan')])
+    clamped_probs = _safe_clamp_prob(bad_probs, "bad_probs")
+    assert clamped_probs.min() >= PROB_CLAMP_MIN, f"Min should be >= {PROB_CLAMP_MIN}"
+    assert clamped_probs.max() <= PROB_CLAMP_MAX, f"Max should be <= {PROB_CLAMP_MAX}"
+    assert not torch.isnan(clamped_probs).any(), "No NaN after clamping"
+    logger.info(f"  Bad probs: {bad_probs.tolist()}")
+    logger.info(f"  Clamped: {clamped_probs.tolist()}")
+    logger.info("  ✓ Probability clamping OK")
+    
+    # Test 6: Text generation
+    logger.info("\n[Test 6] Text generation")
     model.eval()
     prompt = torch.randint(0, vocab_size, (1, 10))  # Start with 10 tokens
     generated = model.generate(prompt, max_new_tokens=20, temperature=0.8)
@@ -1005,8 +1311,8 @@ if __name__ == "__main__":
     logger.info(f"  Prompt: {prompt.shape} → Generated: {generated.shape}")
     logger.info("  ✓ Generation OK")
     
-    # Test 5: Dense baseline (MLP mode)
-    logger.info("\n[Test 5] Dense baseline (depth=0, K=0)")
+    # Test 7: Dense baseline (MLP mode, K=0)
+    logger.info("\n[Test 7] Dense baseline (depth=0, K=0)")
     mlp = BoeNet(
         vocab_size=vocab_size,
         embed_dim=embed_dim,
@@ -1020,8 +1326,8 @@ if __name__ == "__main__":
     logger.info(f"  MLP output: {logits_mlp.shape}")
     logger.info("  ✓ Dense baseline OK")
     
-    # Test 6: Debug mode
-    logger.info("\n[Test 6] Debug mode")
+    # Test 8: Debug mode
+    logger.info("\n[Test 8] Debug mode")
     model_debug = BoeNet(
         vocab_size=vocab_size,
         embed_dim=embed_dim,
