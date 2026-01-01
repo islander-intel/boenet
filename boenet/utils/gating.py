@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-utils/gating.py (v2.1.0)
+boenet/utils/gating.py (v3.0.0 - True BFS)
 
 Modular gating components for BFS-inspired neural networks.
 
-v2.1.0 Fixes: Added logit/probability clamping to prevent CUDA assertion failures.
+v3.0.0 Changes (True BFS Support):
+  - GrowthPolicyNet now takes LEVEL-AGGREGATED input (not per-node)
+  - Single decision per level for balanced tree expansion
+  - Preserved numerical stability from v2.1.0
+
+v2.1.0 Features (Preserved):
+  - Logit/probability clamping to prevent CUDA assertion failures
+  - NaN detection and handling
 
 Components:
-  1) GrowthPolicyNet: Binary grow/stop policy for REINFORCE
+  1) GrowthPolicyNet: Binary grow/stop policy for REINFORCE (LEVEL-BASED)
   2) ScalarGate: Binary pruning with straight-through estimation
   3) ThresholdPruner: Magnitude-based pruning (deterministic)
   4) HardConcreteGate: L0 sparsity gate
 
-Author: William McKeon
-Updated: 2025-12-30 (v2.1.0 - Numerical stability fixes)
+Author: BoeNet Project
+Version: 3.0.0
+Date: 2025-12-31
 """
 
 from __future__ import annotations
@@ -30,21 +38,35 @@ __all__ = ["GrowthPolicyNet", "ScalarGate", "HardConcreteGate", "ThresholdPruner
 
 logger = logging.getLogger(__name__)
 
-# Numerical stability constants
+# =============================================================================
+# NUMERICAL STABILITY CONSTANTS
+# =============================================================================
 LOGIT_CLAMP_MIN = -20.0
 LOGIT_CLAMP_MAX = 20.0
 PROB_CLAMP_MIN = 1e-7
 PROB_CLAMP_MAX = 1.0 - 1e-7
 
 
+# =============================================================================
+# GROWTH POLICY NETWORK (v3.0.0 - Level-Aggregated for True BFS)
+# =============================================================================
+
 class GrowthPolicyNet(nn.Module):
     """
-    Binary grow/stop policy for REINFORCE-based dynamic branching (v2.1.0).
+    Binary grow/stop policy for REINFORCE-based dynamic branching (v3.0.0).
     
-    v2.1.0 FIXES:
-    - Added logit clamping before sigmoid to prevent overflow
-    - Added probability clamping after sigmoid as safety net
-    - Added NaN detection and handling
+    v3.0.0 CHANGES (True BFS):
+    - Now takes LEVEL-AGGREGATED hidden states as input
+    - Makes ONE decision for entire level (not per node)
+    - This enables balanced tree expansion
+    
+    The policy receives the mean hidden state of all nodes at a level
+    and outputs a single grow probability for that level.
+    
+    v2.1.0 Features (Preserved):
+    - Logit clamping before sigmoid to prevent overflow
+    - Probability clamping after sigmoid as safety net
+    - NaN detection and handling
     
     Parameters
     ----------
@@ -52,6 +74,21 @@ class GrowthPolicyNet(nn.Module):
         Hidden dimension of node states.
     max_depth : int
         Maximum BFS expansion depth (for depth encoding).
+        
+    Input
+    -----
+    h : torch.Tensor
+        Level-aggregated hidden states, shape [N, hidden_dim].
+        This is the MEAN of all node hidden states at the current level.
+        N = batch_size * seq_len for language modeling.
+    depth_idx : int
+        Current expansion depth (0-indexed).
+        
+    Output
+    ------
+    grow_prob : torch.Tensor
+        Grow probability for the entire level, shape [N, 1].
+        In True BFS, this is averaged across N to get a single level decision.
     """
     
     def __init__(self, hidden_dim: int, max_depth: int):
@@ -59,20 +96,28 @@ class GrowthPolicyNet(nn.Module):
         self.hidden_dim = int(hidden_dim)
         self.max_depth = int(max_depth)
         
-        input_dim = self.hidden_dim + self.max_depth
-        mid_dim = max(self.hidden_dim // 2, 16)
+        # Input: hidden_dim + depth_encoding
+        # We use a learned depth embedding instead of one-hot for efficiency
+        input_dim = self.hidden_dim + self.hidden_dim  # hidden + depth_embed
+        mid_dim = max(self.hidden_dim // 2, 32)
         
+        # Depth embedding (learned representation of which level we're at)
+        self.depth_embed = nn.Embedding(max(self.max_depth + 1, 1), self.hidden_dim)
+        nn.init.normal_(self.depth_embed.weight, mean=0.0, std=0.02)
+        
+        # Policy MLP: [hidden + depth_embed] -> [mid] -> [1]
         self.policy_fc1 = nn.Linear(input_dim, mid_dim)
         self.policy_fc2 = nn.Linear(mid_dim, 1)
         
-        # Improved initialization for stability
+        # Initialization for stable training
         nn.init.kaiming_uniform_(self.policy_fc1.weight, a=math.sqrt(5))
         if self.policy_fc1.bias is not None:
-            nn.init.constant_(self.policy_fc1.bias, -0.1)
+            nn.init.constant_(self.policy_fc1.bias, 0.0)
         
+        # Initialize output layer to produce ~0.5 probability initially
         nn.init.xavier_uniform_(self.policy_fc2.weight, gain=0.5)
         if self.policy_fc2.bias is not None:
-            nn.init.constant_(self.policy_fc2.bias, -0.2)
+            nn.init.constant_(self.policy_fc2.bias, 0.0)  # sigmoid(0) = 0.5
         
         # For backward compatibility with code that accesses self.policy[0].weight
         self.policy = nn.Sequential(
@@ -85,14 +130,15 @@ class GrowthPolicyNet(nn.Module):
     
     def forward(self, h: torch.Tensor, depth_idx: int) -> torch.Tensor:
         """
-        Compute grow probability for nodes at given depth.
+        Compute grow probability for a level given aggregated hidden state.
         
-        Returns probabilities GUARANTEED to be in (PROB_CLAMP_MIN, PROB_CLAMP_MAX).
+        This is used for TRUE BFS where we make ONE decision per level.
+        The input `h` should be the mean of all node hidden states at the level.
         
         Parameters
         ----------
         h : torch.Tensor
-            Node hidden states, shape [N, hidden_dim].
+            Level-aggregated hidden states, shape [N, hidden_dim].
         depth_idx : int
             Current expansion depth (0-indexed).
             
@@ -100,6 +146,7 @@ class GrowthPolicyNet(nn.Module):
         -------
         torch.Tensor
             Grow probabilities, shape [N, 1].
+            Guaranteed to be in (PROB_CLAMP_MIN, PROB_CLAMP_MAX).
         """
         N = h.size(0)
         device = h.device
@@ -108,39 +155,65 @@ class GrowthPolicyNet(nn.Module):
         # Check input for NaN
         if torch.isnan(h).any():
             nan_count = torch.isnan(h).sum().item()
-            logger.warning(f"[GrowthPolicyNet] Input has {nan_count} NaN values. Replacing with zeros.")
+            logger.warning(
+                f"[GrowthPolicyNet] Input has {nan_count} NaN values. "
+                f"Replacing with zeros."
+            )
             h = torch.where(torch.isnan(h), torch.zeros_like(h), h)
         
-        # Create depth one-hot encoding
-        depth_onehot = torch.zeros(N, self.max_depth, device=device, dtype=dtype)
-        if 0 <= depth_idx < self.max_depth:
-            depth_onehot[:, depth_idx] = 1.0
+        # Get depth embedding
+        # Clamp depth_idx to valid range
+        safe_depth = min(max(depth_idx, 0), self.max_depth)
+        depth_indices = torch.full((N,), safe_depth, device=device, dtype=torch.long)
+        depth_emb = self.depth_embed(depth_indices)  # [N, hidden_dim]
         
-        # Concatenate and compute
-        policy_input = torch.cat([h, depth_onehot], dim=-1)
+        # Concatenate hidden state with depth embedding
+        policy_input = torch.cat([h, depth_emb], dim=-1)  # [N, 2*hidden_dim]
+        
+        # Forward through policy MLP
         hidden = F.relu(self.policy_fc1(policy_input))
-        logits = self.policy_fc2(hidden)
+        logits = self.policy_fc2(hidden)  # [N, 1]
         
-        # CRITICAL FIX: Clamp logits before sigmoid
+        # CRITICAL: Clamp logits before sigmoid to prevent overflow
         logits_clamped = logits.clamp(LOGIT_CLAMP_MIN, LOGIT_CLAMP_MAX)
         
-        # Apply sigmoid
+        # Apply sigmoid to get probability
         grow_prob = torch.sigmoid(logits_clamped)
         
-        # CRITICAL FIX: Final probability clamp (safety net)
+        # CRITICAL: Final probability clamp (safety net)
         grow_prob = grow_prob.clamp(PROB_CLAMP_MIN, PROB_CLAMP_MAX)
         
         # Final NaN check
         if torch.isnan(grow_prob).any():
-            logger.error("[GrowthPolicyNet] Output has NaN AFTER clamping. Replacing with 0.5.")
-            grow_prob = torch.where(torch.isnan(grow_prob), torch.full_like(grow_prob, 0.5), grow_prob)
+            logger.error(
+                "[GrowthPolicyNet] Output has NaN AFTER clamping. "
+                "Replacing with 0.5."
+            )
+            grow_prob = torch.where(
+                torch.isnan(grow_prob),
+                torch.full_like(grow_prob, 0.5),
+                grow_prob
+            )
+        
+        if self._debug:
+            print(f"[GrowthPolicy] depth={depth_idx}, "
+                  f"grow_prob: mean={grow_prob.mean().item():.4f}, "
+                  f"min={grow_prob.min().item():.4f}, "
+                  f"max={grow_prob.max().item():.4f}")
         
         return grow_prob
 
 
+# =============================================================================
+# SCALAR GATE (Unchanged from v2.1.0)
+# =============================================================================
+
 class ScalarGate(nn.Module):
     """
     Learnable binary gate with straight-through rounding.
+    
+    Used for pruning decisions. Outputs both soft probability and
+    hard binary decision (with gradient passed through via straight-through).
     
     Parameters
     ----------
@@ -161,18 +234,60 @@ class ScalarGate(nn.Module):
             nn.init.zeros_(self.fc.bias)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns (p_soft, z_hard) where z_hard uses straight-through."""
+        """
+        Forward pass.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input features, shape [..., in_dim].
+            
+        Returns
+        -------
+        Tuple[torch.Tensor, torch.Tensor]
+            (p_soft, z_hard) where:
+            - p_soft: Soft probability, shape [..., 1]
+            - z_hard: Hard binary decision with straight-through gradient
+        """
         logits = self.fc(x).clamp(LOGIT_CLAMP_MIN, LOGIT_CLAMP_MAX)
         p = torch.sigmoid(logits).clamp(PROB_CLAMP_MIN, PROB_CLAMP_MAX)
         z_hard = (p >= self.threshold).float()
+        # Straight-through estimator
         z = z_hard.detach() - p.detach() + p
         return p, z
 
 
-class HardConcreteGate(nn.Module):
-    """Hard-Concrete gate for L0 regularization."""
+# =============================================================================
+# HARD CONCRETE GATE (Unchanged from v2.1.0)
+# =============================================================================
 
-    def __init__(self, in_dim: int, beta: float = 2.0, gamma: float = -0.1, zeta: float = 1.1):
+class HardConcreteGate(nn.Module):
+    """
+    Hard-Concrete gate for L0 regularization.
+    
+    Implements the hard concrete distribution for differentiable L0 sparsity.
+    During training, samples from the stretched distribution.
+    During inference, uses the mode.
+    
+    Parameters
+    ----------
+    in_dim : int
+        Input feature dimension.
+    beta : float, default=2.0
+        Temperature for the concrete distribution.
+    gamma : float, default=-0.1
+        Lower bound of the stretched distribution.
+    zeta : float, default=1.1
+        Upper bound of the stretched distribution.
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        beta: float = 2.0,
+        gamma: float = -0.1,
+        zeta: float = 1.1
+    ):
         super().__init__()
         self.fc = nn.Linear(in_dim, 1, bias=True)
         self.beta = float(beta)
@@ -182,86 +297,205 @@ class HardConcreteGate(nn.Module):
         if self.fc.bias is not None:
             nn.init.zeros_(self.fc.bias)
 
-    def forward(self, x: torch.Tensor, training: Optional[bool] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        training: Optional[bool] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input features.
+        training : Optional[bool]
+            Override training mode. If None, uses self.training.
+            
+        Returns
+        -------
+        Tuple[torch.Tensor, torch.Tensor]
+            (p_open, z) where:
+            - p_open: Probability of gate being open
+            - z: Gate value in [0, 1]
+        """
         if training is None:
             training = self.training
+            
         logits = self.fc(x).clamp(LOGIT_CLAMP_MIN, LOGIT_CLAMP_MAX)
+        
         if training:
+            # Sample from uniform and apply inverse CDF
             u = torch.rand_like(logits).clamp(1e-8, 1 - 1e-8)
-            s = torch.sigmoid((torch.log(u) - torch.log(1 - u) + logits) / self.beta)
+            s = torch.sigmoid(
+                (torch.log(u) - torch.log(1 - u) + logits) / self.beta
+            )
         else:
+            # Use mode during inference
             s = torch.sigmoid(logits / self.beta)
+        
+        # Stretch to [gamma, zeta] and clamp to [0, 1]
         s_bar = s * (self.zeta - self.gamma) + self.gamma
         z = torch.clamp(s_bar, 0.0, 1.0)
+        
+        # Probability of gate being open (before stretching)
         p_open = torch.sigmoid(logits).clamp(PROB_CLAMP_MIN, PROB_CLAMP_MAX)
+        
         return p_open, z
 
 
+# =============================================================================
+# THRESHOLD PRUNER (Unchanged from v2.1.0)
+# =============================================================================
+
 class ThresholdPruner(nn.Module):
-    """Deterministic pruner based on activation magnitude."""
+    """
+    Deterministic pruner based on activation magnitude.
+    
+    Prunes nodes whose activation magnitude is below a threshold.
+    No learnable parameters - purely based on magnitude.
+    
+    Parameters
+    ----------
+    mode : str, default="l2"
+        Norm type for computing magnitude. One of:
+        - "l2": L2 norm
+        - "l1": L1 norm
+        - "mean_abs": Mean absolute value
+        - "max_abs": Maximum absolute value
+    threshold : float, default=1e-3
+        Pruning threshold. Nodes with magnitude below this are pruned.
+    """
 
     def __init__(self, mode: str = "l2", threshold: float = 1e-3):
         super().__init__()
         valid_modes = {"l2", "l1", "mean_abs", "max_abs"}
         if mode not in valid_modes:
-            raise ValueError(f"mode must be one of {valid_modes}")
+            raise ValueError(f"mode must be one of {valid_modes}, got {mode}")
         self.mode = mode
         self.register_buffer("threshold", torch.tensor(float(threshold)))
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
+        """
+        Compute keep mask based on activation magnitude.
+        
+        Parameters
+        ----------
+        h : torch.Tensor
+            Hidden states, shape [..., hidden_dim].
+            
+        Returns
+        -------
+        torch.Tensor
+            Boolean mask, True for nodes to keep.
+        """
         if self.mode == "l2":
             score = torch.linalg.vector_norm(h, ord=2, dim=-1)
         elif self.mode == "l1":
             score = torch.linalg.vector_norm(h, ord=1, dim=-1)
         elif self.mode == "mean_abs":
             score = h.abs().mean(dim=-1)
-        else:
+        else:  # max_abs
             score = h.abs().max(dim=-1).values
+        
         return score >= self.threshold
 
 
+# =============================================================================
+# SELF-TEST
+# =============================================================================
+
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-    torch.manual_seed(0)
-    B, H = 4, 8
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+    
+    torch.manual_seed(42)
+    B, H = 8, 64
     x = torch.randn(B, H)
 
-    logger.info("=" * 50)
-    logger.info("gating.py v2.1.0 Self-Test")
-    logger.info("=" * 50)
+    logger.info("=" * 60)
+    logger.info("gating.py v3.0.0 Self-Test (True BFS)")
+    logger.info("=" * 60)
 
-    # Test GrowthPolicyNet
-    policy = GrowthPolicyNet(hidden_dim=H, max_depth=3)
-    for d in range(3):
-        p = policy(x, d)
-        assert p.shape == (B, 1)
-        assert (p >= PROB_CLAMP_MIN).all() and (p <= PROB_CLAMP_MAX).all()
-    logger.info("✓ GrowthPolicyNet OK")
+    # Test 1: GrowthPolicyNet basic functionality
+    logger.info("\n[Test 1] GrowthPolicyNet basic functionality")
+    policy = GrowthPolicyNet(hidden_dim=H, max_depth=4)
+    for depth in range(5):
+        p = policy(x, depth)
+        assert p.shape == (B, 1), f"Expected shape ({B}, 1), got {p.shape}"
+        assert (p >= PROB_CLAMP_MIN).all(), "Probability below minimum"
+        assert (p <= PROB_CLAMP_MAX).all(), "Probability above maximum"
+    logger.info("  ✓ Basic functionality OK")
 
-    # Test with extreme inputs
+    # Test 2: GrowthPolicyNet with extreme inputs
+    logger.info("\n[Test 2] GrowthPolicyNet with extreme inputs")
     x_large = torch.randn(B, H) * 1000
     p_large = policy(x_large, 0)
-    assert not torch.isnan(p_large).any()
-    logger.info("✓ GrowthPolicyNet extreme inputs OK")
+    assert not torch.isnan(p_large).any(), "NaN in output with large inputs"
+    assert (p_large >= PROB_CLAMP_MIN).all(), "Probability below minimum"
+    assert (p_large <= PROB_CLAMP_MAX).all(), "Probability above maximum"
+    logger.info("  ✓ Extreme inputs OK")
 
-    # Test ScalarGate
+    # Test 3: GrowthPolicyNet with NaN inputs
+    logger.info("\n[Test 3] GrowthPolicyNet with NaN inputs")
+    x_nan = torch.randn(B, H)
+    x_nan[0, 0] = float('nan')
+    p_nan = policy(x_nan, 0)
+    assert not torch.isnan(p_nan).any(), "NaN propagated to output"
+    logger.info("  ✓ NaN handling OK")
+
+    # Test 4: GrowthPolicyNet gradient flow
+    logger.info("\n[Test 4] GrowthPolicyNet gradient flow")
+    x_grad = torch.randn(B, H, requires_grad=True)
+    p_grad = policy(x_grad, 2)
+    loss = p_grad.sum()
+    loss.backward()
+    assert x_grad.grad is not None, "No gradient computed"
+    assert not torch.isnan(x_grad.grad).any(), "NaN in gradient"
+    logger.info("  ✓ Gradient flow OK")
+
+    # Test 5: ScalarGate
+    logger.info("\n[Test 5] ScalarGate")
     sg = ScalarGate(in_dim=H)
     p_soft, z = sg(x)
-    assert p_soft.shape == (B, 1) and z.shape == (B, 1)
-    logger.info("✓ ScalarGate OK")
+    assert p_soft.shape == (B, 1), f"Expected ({B}, 1), got {p_soft.shape}"
+    assert z.shape == (B, 1), f"Expected ({B}, 1), got {z.shape}"
+    assert ((z == 0) | (z == 1)).all(), "z should be binary"
+    logger.info("  ✓ ScalarGate OK")
 
-    # Test HardConcreteGate
+    # Test 6: HardConcreteGate
+    logger.info("\n[Test 6] HardConcreteGate")
     hcg = HardConcreteGate(in_dim=H)
     p_open, z_cont = hcg(x, training=True)
-    assert p_open.shape == (B, 1)
-    logger.info("✓ HardConcreteGate OK")
+    assert p_open.shape == (B, 1), f"Expected ({B}, 1), got {p_open.shape}"
+    assert (z_cont >= 0).all() and (z_cont <= 1).all(), "z should be in [0, 1]"
+    logger.info("  ✓ HardConcreteGate OK")
 
-    # Test ThresholdPruner
-    pruner = ThresholdPruner(mode="l2", threshold=1.5)
-    keep = pruner(x)
-    assert keep.shape == (B,) and keep.dtype == torch.bool
-    logger.info("✓ ThresholdPruner OK")
+    # Test 7: ThresholdPruner
+    logger.info("\n[Test 7] ThresholdPruner")
+    for mode in ["l2", "l1", "mean_abs", "max_abs"]:
+        pruner = ThresholdPruner(mode=mode, threshold=1.5)
+        keep = pruner(x)
+        assert keep.shape == (B,), f"Expected ({B},), got {keep.shape}"
+        assert keep.dtype == torch.bool, f"Expected bool, got {keep.dtype}"
+    logger.info("  ✓ ThresholdPruner OK")
 
-    logger.info("=" * 50)
+    # Test 8: Level-aggregated input simulation
+    logger.info("\n[Test 8] Level-aggregated input simulation")
+    # Simulate what happens in True BFS: aggregate multiple nodes
+    num_nodes_at_level = 4
+    node_hiddens = torch.randn(num_nodes_at_level, B, H)
+    level_aggregated = node_hiddens.mean(dim=0)  # [B, H]
+    p_level = policy(level_aggregated, depth_idx=1)
+    # In True BFS, we average across batch to get single decision
+    p_level_decision = p_level.mean()
+    assert p_level_decision.shape == (), "Should be scalar"
+    assert PROB_CLAMP_MIN <= p_level_decision <= PROB_CLAMP_MAX
+    logger.info(f"  Level decision probability: {p_level_decision.item():.4f}")
+    logger.info("  ✓ Level-aggregated input OK")
+
+    logger.info("\n" + "=" * 60)
     logger.info("All tests passed!")
-    logger.info("=" * 50)
+    logger.info("=" * 60)

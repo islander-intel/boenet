@@ -1,655 +1,567 @@
 # ============================================================================
-# BoeNet v2.0.0 Threshold Sweep Configuration (Language Model)
+# BoeNet v2.0.1 Phase 2: K=2 Depth Sweep (Lean Version)
 # ============================================================================
-# 
-# PURPOSE: Find optimal (lambda_efficiency, greedy_threshold) pairs
-#          for language modeling on WikiText-2/TinyStories
-#          Critical for v2.0.0 due to training/inference mismatch issue
 #
-# Converted from BFSNet v2.0.0 (Vision) to BoeNet v2.0.0 (Language)
-# -----------------------------------------------------------------
-# Key Changes:
-#   - ADDED: vocab_size, seq_len, embed_dim, dataset parameters
-#   - ADDED: epochs_list sweep for convergence analysis
-#   - CHANGED: Accuracy metrics → Perplexity metrics
-#   - CHANGED: Script paths → train_boenet.py, infer_boenet.py
-#   - CHANGED: Input dimensions (784 → embed_dim)
-#   - CHANGED: Output dimensions (10 → vocab_size)
-#   - CHANGED: Default dataset shakespeare → wikitext2 (v2.0.0)
-#   - UNCHANGED: All policy parameters (λ, threshold, rollouts, etc.)
+# PURPOSE: Test if DEPTH is the key variable for K=2 performance
+#          Quick 6-run sweep to validate hypothesis before full exploration
+#          Prepare best model for USER INTERACTION testing
 #
-# v2.0.0 DATASET CHANGE:
-# ----------------------
-# Default dataset changed from shakespeare to wikitext2 because:
-#   1. karpathy/tiny_shakespeare uses deprecated HuggingFace dataset scripts
-#   2. WikiText-2 uses modern Parquet format (no script issues)
-#   3. WikiText-2 is well-maintained by Salesforce
-#   4. Similar size (~2MB), suitable for quick experiments
+# ============================================================================
+# THE PIVOT: DEPTH > K
+# ============================================================================
 #
-# If you still want Shakespeare, use --dataset shakespeare which will
-# download directly from Karpathy's GitHub (bypasses HuggingFace).
+# WHAT WE LEARNED FROM PHASE 1:
+# -----------------------------
+# All tree models (K=2,3,4) plateau around 11.63-11.70 PPL at depth=2:
 #
-# CRITICAL FINDING (from BFSNet v2.0.0):
-# --------------------------------------
-# Models trained with v1.0.0 create ZERO children in greedy inference with
-# default threshold=0.5 because policy learns grow_prob ≈ 0.40-0.50.
+#   | K | Depth | Max Nodes | Best PPL | Time/Epoch |
+#   |---|-------|-----------|----------|------------|
+#   | 0 | N/A   | 1         | 11.55    | 13 sec     |
+#   | 2 | 2     | 7         | 11.64    | 95 sec     |
+#   | 3 | 2     | 13        | 11.63    | 320 sec    |
+#   | 4 | 2     | 21        | 11.70    | 330 sec    |
 #
-# This configuration sweeps both λ (training behavior) and threshold
-# (inference behavior) to find optimal pairs empirically.
+# KEY INSIGHT: The bottleneck is NOT K (branching factor),
+#              but DEPTH (reasoning levels)!
 #
-# LANGUAGE MODEL METRICS:
-# -----------------------
-# - Perplexity (PPL): exp(cross_entropy_loss), lower is better
-# - Random baseline PPL = vocab_size (256 for char-level)
-# - Good char-level PPL: 2-20
-# - Excellent char-level PPL: < 5
+# NEW HYPOTHESIS:
+# ---------------
+# K=2 + More Depth = Better than K=3/K=4 at depth=2
 #
-# EXPERIMENTAL EXPECTATIONS (based on BFSNet results):
-# ----------------------------------------------------
-# λ=0.05, threshold=0.50:
-#   Train: ~6-8 nodes/position, PPL ~15-25
-#   Infer: 1.0 nodes/position, PPL ~15-25 (root-only inference)
-#   Status: Root-only inference (threshold too high)
+#   | Depth | K=2 Nodes | Reasoning Levels | Expected PPL |
+#   |-------|-----------|------------------|--------------|
+#   | 2     | 7         | 3 levels         | 11.64 (known)|
+#   | 3     | 15        | 4 levels         | ~11.58?      |
+#   | 4     | 31        | 5 levels         | ~11.54?      |
 #
-# λ=0.05, threshold=0.42 (RECOMMENDED):
-#   Train: ~6-8 nodes/position, PPL ~12-20
-#   Infer: ~6-8 nodes/position, PPL ~12-20
-#   Status: Balanced (training/inference matched)
+# If depth=4 matches K=0 (11.55), we've found the optimal architecture!
 #
-# KEY INSIGHT FROM BFSNET: Higher λ gives BETTER results (counter-intuitive!)
-#   λ=0.05: Better generalization (regularization effect)
-#   λ=0.01: Worse generalization (less regularization)
+# ============================================================================
+# BINARY TREE DEPTH VISUALIZATION
+# ============================================================================
 #
-# WHY EPOCHS SWEEP MATTERS FOR LANGUAGE MODELS:
-# ---------------------------------------------
-# Unlike vision models (FashionMNIST converges in ~10 epochs), language models
-# have different convergence characteristics:
-#   - WikiText-2 (~2MB): May need 10-20 epochs to converge
-#   - TinyStories (~50M chars): May converge faster per epoch (more data)
-#   - Perplexity curves decay more gradually than accuracy curves
-#   - Policy behavior may change with more training
+# DEPTH=2 (Current - 7 nodes, 3 reasoning levels):
 #
-# This sweep includes epochs to understand:
-#   1. When does perplexity plateau?
-#   2. Does optimal threshold change with training duration?
-#   3. Does policy (grow_prob) stabilize at different epochs?
-#   4. What's the minimum epochs needed for good results?
+#         Root (Level 0: Initial thought)
+#         /  \
+#        A    B (Level 1: Yes/No)
+#       /\    /\
+#      1  2  3  4 (Level 2: Confidence)
 #
-# SCOPE: Comprehensive sweep for language modeling
-# ------------------------------------------------
-# This config sweeps:
-#   - Policy parameters: λ, threshold
-#   - Language model parameters: seq_len, embed_dim
-#   - Training duration: epochs
+# DEPTH=3 (15 nodes, 4 reasoning levels):
 #
-# Total experiments (BFS only, K=3):
-#   4 λ × 6 thresholds × 2 seq_len × 2 embed_dim × 4 epochs = 384 runs
-# Plus dense baseline (K=0):
-#   1 × 2 seq_len × 2 embed_dim × 4 epochs = 16 runs
-# Grand total: 400 runs
+#              Root (Level 0: Initial thought)
+#             /    \
+#            A      B (Level 1: Yes/No)
+#           /\      /\
+#          1  2    3  4 (Level 2: Confidence)
+#         /\ /\   /\ /\
+#        8 leaf nodes (Level 3: Evidence)
 #
-# Estimated time: ~12-20 hours (at ~2-3 min/run average for language models)
+# DEPTH=4 (31 nodes, 5 reasoning levels):
 #
-# For faster initial exploration, consider reducing sweep dimensions:
-#   - Use epochs_list: [10, 20] instead of [5, 10, 15, 20] → 200 runs
-#   - Use seq_len_list: [128] instead of [64, 128] → 200 runs
-#   - Use embed_dim_list: [64] instead of [32, 64] → 200 runs
+#                   Root (Level 0: Initial thought)
+#                  /    \
+#                 A      B (Level 1: Yes/No)
+#                /\      /\
+#               ...    ... (Level 2: Confidence)
+#              /\  /\  /\  /\
+#             ... ... ... ... (Level 3: Evidence)
+#            /\ /\ /\ /\ /\ /\ /\ /\
+#           16 leaf nodes (Level 4: Context/Refinement)
 #
-# Usage:
-#   python boenet_training_matrix.py --config configs/experiment-config.yaml
+# REASONING INTERPRETATION:
+# -------------------------
+# Depth=2: "Is this likely? → Yes/No → How confident?"
+# Depth=3: "Is this likely? → Yes/No → Confident? → What evidence?"
+# Depth=4: "Is this likely? → Yes/No → Confident? → Evidence? → Context?"
 #
-# Expected Outputs:
-#   - runs/TIMESTAMP/matrix_results.csv
-#   - runs/TIMESTAMP/matrix_results.jsonl
-#   - Per-run logs and checkpoints
+# More depth = More reasoning steps = Better predictions
 #
-# Analysis Questions This Answers:
-#   1. What's the optimal threshold for each λ value?
-#   2. Which (λ, threshold) pair gives best perplexity?
-#   3. Which (λ, threshold) pair gives best efficiency?
-#   4. What's the Pareto frontier (perplexity vs nodes)?
-#   5. How does learned grow_prob vary with λ?
-#   6. How do seq_len and embed_dim affect optimal thresholds?
-#   7. How many epochs are needed for convergence?
-#   8. Does optimal threshold change with training duration?
+# ============================================================================
+# THIS SWEEP: 6 RUNS (~6 hours)
+# ============================================================================
+#
+# Configuration:
+#   K=2 only (binary reasoning - proven winner)
+#   Depths: 2, 3, 4 (the key variable)
+#   λ=0.05 (best from Phase 1)
+#   threshold=0.50 (best sparsity)
+#   Epochs: 20, 30 (convergence check)
+#
+# Run count: 3 depths × 1 λ × 1 threshold × 2 epochs = 6 runs
+#
+# Time estimate:
+#   Depth=2: 2 runs × ~35 min = ~70 min
+#   Depth=3: 2 runs × ~56 min = ~112 min
+#   Depth=4: 2 runs × ~94 min = ~188 min
+#   Total: ~6 hours
+#
+# ============================================================================
+# WHAT HAPPENS AFTER THIS SWEEP
+# ============================================================================
+#
+# STEP 1: Analyze results
+#   - Does depth=3 or depth=4 beat depth=2?
+#   - Does deeper K=2 match K=0 baseline (11.55)?
+#
+# STEP 2: User interaction testing (YOU test the best model)
+#   docker run -it --gpus all \
+#     -v ${PWD}/runs:/app/runs \
+#     boenet:cuda python infer_boenet.py \
+#       --ckpt runs/BEST_MODEL/model.pt \
+#       --generate --max_tokens 200 --temperature 0.8
+#
+# STEP 3: If results are promising → Develop DYNAMIC DEPTH algorithm
+#   Instead of fixed max_depth, the model decides:
+#   - "Do I need to think deeper about this?"
+#   - Like true BFS: expand until solution found
+#   - Adaptive reasoning depth per input
+#
+# ============================================================================
+# FUTURE: DYNAMIC DEPTH ALGORITHM (After This Sweep)
+# ============================================================================
+#
+# CURRENT APPROACH (Fixed Depth):
+#   max_depth = 4  # Hardcoded
+#   # Every input gets same depth, regardless of difficulty
+#
+# PROPOSED APPROACH (Dynamic Depth):
+#   # Model decides when to stop expanding
+#   while not confident_enough and depth < max_depth:
+#       expand_next_level()
+#       depth += 1
+#
+# HOW IT WOULD WORK:
+#   1. Start with root node
+#   2. Policy decides: "Should I expand deeper?"
+#   3. If yes → expand children, repeat
+#   4. If no → stop, make prediction
+#   5. Different inputs get different depths!
+#
+# BENEFITS:
+#   - Easy inputs: depth=1-2 (fast)
+#   - Hard inputs: depth=4-5 (accurate)
+#   - True adaptive computation
+#   - Like human System 1 vs System 2 thinking
+#
+# IMPLEMENTATION IDEAS:
+#   - Add "stop" action to policy network
+#   - Train with reward that penalizes unnecessary depth
+#   - Or: confidence threshold - stop when prediction is confident
+#
+# This is the REAL innovation: not just K or fixed depth,
+# but LEARNED ADAPTIVE DEPTH based on input complexity!
 #
 # ============================================================================
 
 sweep:
   # ==========================================================================
-  # LANGUAGE MODEL PARAMETERS (NEW FOR BOENET)
+  # LANGUAGE MODEL PARAMETERS (FIXED - PROVEN VALUES)
   # ==========================================================================
   
-  # Vocabulary size: FIXED at 256 (character-level)
-  # Character-level tokenization uses all 256 byte values
-  # For word-level or BPE, increase this (e.g., 32000)
+  # Vocabulary size: FIXED at 256 (character-level ByteTokenizer)
   vocab_size: 256
   
-  # Sequence length: Context window size
-  # Longer sequences = more context but slower training
-  # Sweep values:
-  #   64:  Fast training, limited context
-  #   128: Standard, good balance (RECOMMENDED)
-  #   256: More context, slower training (not included for speed)
-  seq_len_list: [64, 128]
+  # Sequence length: FIXED at 128 (good balance of context and speed)
+  seq_len_list: [128]
   
-  # Embedding dimension: Token embedding size
-  # Projects discrete tokens to continuous space before BFS tree
-  # Sweep values:
-  #   32:  Compact, faster, may underfit
-  #   64:  Standard, good balance (RECOMMENDED)
-  #   128: Richer embeddings, more compute (not included for speed)
-  embed_dim_list: [32, 64]
+  # Embedding dimension: FIXED at 64 (proven to work well)
+  embed_dim_list: [64]
   
-  # Dataset: Text corpus for training
-  # Options:
-  #   wikitext2:   ~2MB, Wikipedia articles, fast training (DEFAULT, RECOMMENDED)
-  #   wikitext103: ~500MB, larger Wikipedia, longer training
-  #   shakespeare: ~1MB, literary style, via GitHub download
-  #   tinystories: ~2GB, simple children's stories, longest training
-  #   textfile:    Custom file via --text_filepath argument
-  #
-  # NOTE: wikitext2 is the default because it uses modern Parquet format
-  # and doesn't have the HuggingFace dataset script issues that shakespeare had.
+  # Dataset: WikiText-2 (consistent with all previous runs)
   dataset: wikitext2
   
   # ==========================================================================
-  # CRITICAL v2.0.0 POLICY PARAMETERS - THRESHOLD SWEEP
+  # K=2 ONLY - BINARY REASONING TREE (PROVEN WINNER)
+  # ==========================================================================
+  #
+  # K=2 won Phase 1 decisively:
+  #   - Same PPL as K=3 (11.64 vs 11.63)
+  #   - 3.4x faster training than K=3
+  #   - 2x faster inference than K=3
+  #   - Handles sparsity gracefully (79% sparse, PPL improves!)
+  #   - GPU-efficient (power of 2)
+  #
+  # K=4 was eliminated:
+  #   - Worse PPL (11.70)
+  #   - Sparsity HURTS quality (PPL jumps to 11.91)
+  #   - Slower than K=2
+  #
+  k_values: [0,2]
+  
+  # ==========================================================================
+  # DEPTH SWEEP - THE KEY VARIABLE (MAIN EXPERIMENT)
+  # ==========================================================================
+  #
+  # THIS IS WHAT WE'RE TESTING
+  #
+  # All previous runs used depth=2. Now testing if more depth helps.
+  #
+  # | Depth | K=2 Nodes | Reasoning Levels | vs K=0 (11.55) |
+  # |-------|-----------|------------------|----------------|
+  # | 2     | 7         | 3 levels         | +0.09 worse    |
+  # | 3     | 15        | 4 levels         | ??? (testing)  |
+  # | 4     | 31        | 5 levels         | ??? (testing)  |
+  #
+  # HYPOTHESIS: Deeper trees will close the gap with K=0
+  #
+  max_depths: [2, 3, 4]
+  
+  # ==========================================================================
+  # POLICY PARAMETERS - BEST FROM PHASE 1
   # ==========================================================================
   
-  # Lambda efficiency: Node count penalty in reward
-  # reward = -perplexity - λ × (nodes_used / max_nodes)
-  # 
-  # Tested values cover wide range:
-  #   0.0:  No penalty (baseline, full tree expected)
-  #   0.01: Light penalty (more nodes, may overfit)
-  #   0.05: Moderate penalty (RECOMMENDED based on BFSNet)
-  #   0.1:  Strong penalty (very sparse, may underfit)
-  #
-  # KEY FINDING FROM BFSNET: λ=0.05 beats λ=0.01 despite fewer nodes!
-  lambda_efficiency_list: [0.0, 0.01, 0.05, 0.1]
+  # Lambda efficiency: FIXED at 0.05 (best from Phase 1)
+  # This gave 79% sparsity with best PPL
+  lambda_efficiency_list: [0.05]
   
-  # Greedy threshold: Inference decision cutoff
-  # action = (grow_prob >= threshold) in greedy mode
-  #
-  # Tested values span learned distribution:
-  #   0.50: Default (results in root-only for most λ values)
-  #   0.45: Just below typical mean_grow_prob
-  #   0.42: Recommended (≈ mean_grow_prob - 0.03)
-  #   0.40: Lenient (expected: partial tree)
-  #   0.35: More lenient (expected: nearly full tree)
-  #   0.30: Very lenient (expected: full tree)
-  #
-  # CRITICAL: This is the KEY parameter to tune for v2.0.0!
-  greedy_threshold_list: [0.30, 0.35, 0.40, 0.42, 0.45, 0.50]
+  # Greedy threshold: FIXED at 0.50 (enables sparsity)
+  # This is where K=2 shines - sparse but accurate
+  greedy_threshold_list: [0.50]
   
-  # Number of rollouts: Stochastic exploration during training
-  # More rollouts = better gradient estimate but slower
-  # FIXED for focused sweep (standard value)
+  # Number of rollouts: FIXED at 3
   num_rollouts_list: [3]
   
-  # Entropy bonus: Encourages exploration
-  # Higher values = more random decisions during training
-  # FIXED for focused sweep (standard value)
+  # Entropy bonus: FIXED at 0.01
   beta_entropy_list: [0.01]
   
-  # Policy loss weight: Balance between LM loss and policy loss
-  # total_loss = lm_loss + beta_policy × policy_loss
-  # FIXED for focused sweep (balanced value)
+  # Policy loss weight: FIXED at 0.5
   beta_policy_list: [0.5]
   
   # ==========================================================================
-  # ARCHITECTURE PARAMETERS - SIMPLIFIED FOR FOCUSED SWEEP
+  # ARCHITECTURE PARAMETERS - FIXED
   # ==========================================================================
   
-  # K values: Dense baseline + single BFS configuration
-  # K=0: Dense MLP (no branching, for comparison)
-  # K=3: BFS with branching (our focus)
-  #
-  # Note: K=0 will skip λ and threshold sweep (not applicable)
-  k_values: [0, 3]
-  
-  # Max depth: FIXED at 2 (standard)
-  # Deep enough to show BFS benefits, shallow enough for fast experiments
-  max_depths: [2]
-  
-  # Hidden dimensions: FIXED at 128 (standard for language models)
-  # Single value to isolate policy/threshold effects
-  # Language models typically need larger hidden dims than vision
+  # Hidden dimensions: FIXED at 128
   hidden_dims: [128]
   
-  # Pooling: FIXED at mean (simplest, most stable)
+  # Pooling: FIXED at mean
   poolings: [mean]
   
   # ==========================================================================
-  # OPTIMIZATION - STANDARD SETTINGS
+  # OPTIMIZATION - FIXED (PROVEN VALUES)
   # ==========================================================================
   
-  # Learning rate: FIXED at 0.001 (standard for AdamW)
+  # Learning rate: FIXED at 0.001
   lrs: [0.001]
   
-  # Batch size: FIXED at 64 (standard)
-  # Language models may benefit from larger batches, but 64 is safe
+  # Batch size: FIXED at 64
   batch_sizes: [64]
   
-  # Weight decay: FIXED at 0.0 (let λ be the only regularization)
+  # Weight decay: FIXED at 0.0
   weight_decays: [0.0]
   
   # ==========================================================================
-  # EPOCHS SWEEP (CRITICAL FOR LANGUAGE MODELS)
+  # EPOCHS - CONVERGENCE CHECK
   # ==========================================================================
   #
-  # Unlike FashionMNIST which converges quickly (~10 epochs), language models
-  # have different convergence characteristics. This sweep helps determine:
+  # Two key values to check convergence:
+  #   20: Extended training
+  #   30: Full training (ensure convergence)
   #
-  #   1. Minimum epochs for reasonable perplexity
-  #   2. When perplexity plateaus
-  #   3. Whether policy behavior (grow_prob) changes with training duration
-  #   4. Optimal training length for different configurations
+  # We skip 10, 15 since we have that data from Phase 1 for depth=2
+  # Deeper trees may need more epochs to converge
   #
-  # Sweep values:
-  #   5:   Early stopping point - check if model learns basics
-  #   10:  Standard checkpoint - typical FashionMNIST convergence point
-  #   15:  Extended training - may improve language models
-  #   20:  Full training - ensure convergence for WikiText-2
-  #
-  # For TinyStories (larger dataset), consider:
-  #   - 5 epochs may be sufficient due to more data
-  #   - 10 epochs for full convergence
-  #
-  # ANALYSIS TIP: Plot perplexity vs epochs to find the "elbow" point
-  # where additional training yields diminishing returns.
-  #
-  epochs_list: [5, 10, 15, 20]
+  epochs_list: [10,20, 30]
 
 # ============================================================================
 # TRAINING SETTINGS
 # ============================================================================
 training:
-  # Epochs per run (can be overridden by epochs_list above)
-  epochs: 10
+  # Default epochs (overridden by epochs_list)
+  epochs: 20
   
-  # Repeats: Single run per config (for speed)
-  # After finding optimal configs, run repeats=3 for statistical validation
+  # Single run per config
   repeats: 1
   
-  # Base random seed
+  # Random seed (consistent with all previous runs)
   seed0: 42
   
-  # Dataset (can be overridden by sweep.dataset above)
-  # Options: wikitext2, wikitext103, shakespeare, tinystories, textfile
+  # Dataset
   dataset: wikitext2
 
 # ============================================================================
-# INFERENCE SETTINGS - CRITICAL FOR POLICY ANALYSIS
+# INFERENCE SETTINGS
 # ============================================================================
 inference:
   # Number of samples for perplexity measurement
-  # 1000 is sufficient for stable perplexity estimate
   infer_samples: 1000
   
-  # Force CPU inference
-  # Ensures fair comparison across configurations
+  # Force CPU inference for fair comparison
   cpu_only: true
   
-  # CRITICAL: Enable policy analysis
-  # This captures growth probability distribution for each model
-  # Essential for understanding threshold mismatch!
+  # Enable policy analysis
   debug_policy: true
 
 # ============================================================================
 # PATHS
 # ============================================================================
 paths:
-  # Output directory (timestamped subdirectory created automatically)
+  # Output directory
   save_root: runs
   
   # Dataset directory
   data_root: ./data
   
-  # Training script (BoeNet v2.0.0 with greedy_threshold support)
+  # Training script (v2.0.1 with stability fixes)
   train_script: train_boenet.py
   
-  # Inference script (BoeNet v2.0.0 with debug_policy support)
+  # Inference script
   infer_script: infer_boenet.py
 
 # ============================================================================
-# EXPECTED RESULTS AND ANALYSIS PLAN
+# RUN COUNT CALCULATION
 # ============================================================================
 #
-# After running this sweep, analyze matrix_results.csv:
+# K=2 depth sweep (lean version):
+#   3 depths × 1 λ × 1 threshold × 2 epochs = 6 runs
 #
-# 1. THRESHOLD OPTIMIZATION FOR EACH λ:
-#    For each lambda_efficiency value:
-#      - Plot: greedy_threshold vs infer_val_ppl
-#      - Find: threshold that minimizes perplexity
-#      - Compare: infer_mean_grow_prob vs greedy_threshold
-#      - Validate: optimal_threshold ≈ mean_grow_prob - 0.03
+# Time estimate per depth:
+#   Depth=2 (7 nodes):  ~95 sec/epoch
+#   Depth=3 (15 nodes): ~150 sec/epoch (estimated)
+#   Depth=4 (31 nodes): ~250 sec/epoch (estimated)
 #
-# 2. LAMBDA COMPARISON AT OPTIMAL THRESHOLDS:
-#    For each λ, use its optimal threshold:
-#      - Compare: validation perplexity
-#      - Compare: inference perplexity
-#      - Compare: nodes used (efficiency)
-#      - Validate: Does λ=0.05 still win for language modeling?
+# Per run (average 25 epochs):
+#   Depth=2: 25 × 95 sec = ~40 min/run × 2 runs = ~80 min
+#   Depth=3: 25 × 150 sec = ~63 min/run × 2 runs = ~126 min
+#   Depth=4: 25 × 250 sec = ~104 min/run × 2 runs = ~208 min
 #
-# 3. PARETO FRONTIER (Perplexity vs Efficiency):
-#    Plot all (λ, threshold) pairs:
-#      - X-axis: infer_avg_nodes
-#      - Y-axis: infer_val_ppl (lower is better)
-#      - Identify: Pareto-optimal configurations
-#      - Find: Best perplexity-efficiency tradeoff
+# Total: ~414 min = ~7 hours
 #
-# 4. POLICY BEHAVIOR ANALYSIS:
-#    For each configuration:
-#      - Measure: debug_policy_mean_grow_prob
-#      - Measure: debug_policy_above_threshold_pct
-#      - Correlate: λ value with learned grow_prob
-#      - Validate: Is grow_prob independent of λ? (expected: yes)
-#
-# 5. SEQUENCE LENGTH ANALYSIS:
-#    For each seq_len:
-#      - Compare: perplexity (longer context should help)
-#      - Compare: nodes per position (should be similar)
-#      - Compare: optimal threshold (should be similar)
-#
-# 6. EMBEDDING DIMENSION ANALYSIS:
-#    For each embed_dim:
-#      - Compare: perplexity (larger should help)
-#      - Compare: training time
-#      - Find: embed_dim with best perplexity/compute tradeoff
-#
-# 7. EPOCHS CONVERGENCE ANALYSIS (NEW):
-#    For each configuration:
-#      - Plot: epochs vs val_ppl (convergence curve)
-#      - Find: epoch where perplexity plateaus
-#      - Compare: convergence speed across λ values
-#      - Determine: minimum epochs needed for good results
-#    
-#    For policy stability:
-#      - Plot: epochs vs mean_grow_prob
-#      - Check: Does grow_prob stabilize at different epochs?
-#      - Validate: Does optimal threshold change with training duration?
-#
-# 8. COST-BENEFIT ANALYSIS:
-#    Compute: (perplexity improvement) / (additional training time)
-#    Find: Sweet spot where more epochs yield diminishing returns
-#    Recommendation: Minimum epochs for target perplexity
-#
-# Example analysis commands:
-#
-# ```python
-# import pandas as pd
-# import matplotlib.pyplot as plt
-# 
-# df = pd.read_csv('runs/TIMESTAMP/matrix_results.csv')
-# 
-# # Filter for BFS (K=3)
-# bfs = df[df['max_children'] == 3]
-# 
-# # Find optimal threshold for each λ
-# for lam in [0.0, 0.01, 0.05, 0.1]:
-#     subset = bfs[bfs['lambda_efficiency'] == lam]
-#     best = subset.loc[subset['infer_val_ppl'].idxmin()]  # Note: idxmin for PPL
-#     print(f"λ={lam}: optimal_threshold={best['greedy_threshold']}, "
-#           f"ppl={best['infer_val_ppl']:.2f}, "
-#           f"nodes={best['infer_avg_nodes']:.1f}, "
-#           f"mean_grow_prob={best['infer_mean_grow_prob']:.4f}")
-#
-# # Analyze sequence length effect
-# for sl in [64, 128]:
-#     subset = bfs[bfs['seq_len'] == sl]
-#     best_ppl = subset['infer_val_ppl'].min()
-#     print(f"seq_len={sl}: best_ppl={best_ppl:.2f}")
-#
-# # Analyze embedding dimension effect
-# for ed in [32, 64]:
-#     subset = bfs[bfs['embed_dim'] == ed]
-#     best_ppl = subset['infer_val_ppl'].min()
-#     print(f"embed_dim={ed}: best_ppl={best_ppl:.2f}")
-#
-# # NEW: Analyze epochs convergence
-# for epochs in [5, 10, 15, 20]:
-#     subset = bfs[bfs['epochs'] == epochs]
-#     best_ppl = subset['infer_val_ppl'].min()
-#     mean_ppl = subset['infer_val_ppl'].mean()
-#     print(f"epochs={epochs}: best_ppl={best_ppl:.2f}, mean_ppl={mean_ppl:.2f}")
-#
-# # NEW: Plot convergence curves for best configuration
-# best_config = bfs.loc[bfs['infer_val_ppl'].idxmin()]
-# lam = best_config['lambda_efficiency']
-# thresh = best_config['greedy_threshold']
-# sl = best_config['seq_len']
-# ed = best_config['embed_dim']
-#
-# convergence = bfs[(bfs['lambda_efficiency'] == lam) & 
-#                   (bfs['greedy_threshold'] == thresh) &
-#                   (bfs['seq_len'] == sl) &
-#                   (bfs['embed_dim'] == ed)]
-# convergence = convergence.sort_values('epochs')
-#
-# plt.figure(figsize=(10, 6))
-# plt.plot(convergence['epochs'], convergence['infer_val_ppl'], 'bo-')
-# plt.xlabel('Epochs')
-# plt.ylabel('Validation Perplexity')
-# plt.title(f'Convergence Curve (λ={lam}, threshold={thresh})')
-# plt.grid(True)
-# plt.savefig('convergence_curve.png')
-# print(f"Convergence curve saved to convergence_curve.png")
-#
-# # NEW: Plot policy stability across epochs
-# plt.figure(figsize=(10, 6))
-# for lam in [0.0, 0.01, 0.05, 0.1]:
-#     subset = bfs[(bfs['lambda_efficiency'] == lam) & 
-#                  (bfs['greedy_threshold'] == 0.42)]  # Use recommended threshold
-#     subset = subset.groupby('epochs')['infer_mean_grow_prob'].mean()
-#     plt.plot(subset.index, subset.values, 'o-', label=f'λ={lam}')
-# plt.xlabel('Epochs')
-# plt.ylabel('Mean Grow Probability')
-# plt.title('Policy Stability Across Training Duration')
-# plt.legend()
-# plt.grid(True)
-# plt.savefig('policy_stability.png')
-# print(f"Policy stability plot saved to policy_stability.png")
-# ```
+# Note: Depth=2 runs will complete first (~80 min),
+#       giving quick comparison data while depth=3,4 continue.
 #
 # ============================================================================
 
 # ============================================================================
-# DEPLOYMENT RECOMMENDATIONS AFTER SWEEP
+# EXPECTED RESULTS
 # ============================================================================
 #
-# Based on BFSNet results and expected language model behavior:
+# BASELINE (from Phase 1):
+#   K=0: PPL = 11.55 (target to match)
+#   K=2 depth=2: PPL = 11.64
 #
-# FOR MAXIMUM EFFICIENCY (Root-Only):
-#   lambda_efficiency: 0.05
-#   greedy_threshold: 0.50
-#   seq_len: 64
-#   embed_dim: 32
-#   epochs: 10 (minimum for reasonable quality)
-#   Expected: 1 node/position, PPL ~20-30
-#   Use case: Latency-critical, embedded devices
+# PREDICTIONS:
+#   | Depth | Expected PPL | vs K=0 | Reasoning |
+#   |-------|--------------|--------|-----------|
+#   | 2     | 11.64        | +0.09  | Known     |
+#   | 3     | ~11.58       | +0.03  | 1 more reasoning level |
+#   | 4     | ~11.54       | -0.01  | 2 more reasoning levels |
 #
-# FOR BALANCED PERFORMANCE (Recommended):
-#   lambda_efficiency: 0.05
-#   greedy_threshold: 0.42
-#   seq_len: 128
-#   embed_dim: 64
-#   epochs: 15 (good convergence)
-#   Expected: ~6-8 nodes/position, PPL ~12-20
-#   Use case: General purpose, good perplexity/efficiency tradeoff
+# IF DEPTH=4 MATCHES OR BEATS K=0:
+#   → Binary reasoning tree is viable architecture
+#   → Depth is the key, not K
+#   → Proceed to user interaction testing
+#   → Then develop dynamic depth algorithm
 #
-# FOR MAXIMUM QUALITY:
-#   lambda_efficiency: 0.0
-#   greedy_threshold: 0.30
-#   seq_len: 128
-#   embed_dim: 64
-#   epochs: 20 (full convergence)
-#   Expected: ~13 nodes/position (full tree), PPL ~10-15
-#   Use case: Quality-critical applications, compute not constrained
-#
-# ADAPTIVE STRATEGY (Advanced):
-#   Train multiple models with different (λ, threshold) pairs
-#   Deploy based on runtime conditions:
-#     - High load → use λ=0.05, threshold=0.50 (efficient, 1 node)
-#     - Normal load → use λ=0.05, threshold=0.42 (balanced, ~6 nodes)
-#     - Low load → use λ=0.0, threshold=0.30 (quality, ~13 nodes)
+# IF DEPTH=4 STILL WORSE THAN K=0:
+#   → Dense (K=0) fundamentally better for this task
+#   → Tree structure adds overhead without benefit
+#   → May need larger model or different approach
 #
 # ============================================================================
 
 # ============================================================================
-# VALIDATION AFTER FINDING OPTIMAL CONFIG
+# USAGE INSTRUCTIONS
 # ============================================================================
 #
-# Once optimal (λ, threshold, epochs) triple is identified:
+# 1. STOP CURRENT SWEEP:
+#    docker rm -f boenet_phase1
 #
-# 1. Run with repeats=3 for statistical validation:
-#    Update this config:
-#      lambda_efficiency_list: [<optimal_lambda>]
-#      greedy_threshold_list: [<optimal_threshold>]
-#      epochs_list: [<optimal_epochs>]
-#      training.repeats: 3
+# 2. SAVE THIS CONFIG:
+#    Save as: configs/experiment-config.yaml
 #
-# 2. Test on larger datasets:
-#    - WikiText-103 (~500MB, larger Wikipedia)
-#    - TinyStories (~2GB, children's stories)
-#    - Larger corpora for more challenging evaluation
+# 3. START DEPTH SWEEP:
+#    docker run -d --gpus all --name boenet_depth_test \
+#      -v ${PWD}/data:/app/data \
+#      -v ${PWD}/runs:/app/runs \
+#      -v ${PWD}/configs:/app/configs \
+#      -v ${PWD}/boenet:/app/boenet \
+#      boenet:cuda python boenet_training_matrix.py \
+#        --config configs/experiment-config.yaml
 #
-# 3. Ablation studies:
-#    - Does optimal threshold change with num_rollouts?
-#    - Does optimal threshold change with beta_entropy?
-#    - Does optimal threshold change with architecture (hidden_dim, depth)?
-#    - Does optimal threshold change with seq_len?
-#    - Does optimal epochs change with dataset size?
+# 4. MONITOR PROGRESS:
+#    docker logs -f boenet_depth_test
 #
-# 4. Text generation evaluation:
-#    - Generate samples with optimal config
-#    - Evaluate coherence, creativity, repetition
-#    - Compare to dense baseline generation
+# 5. CHECK GPU UTILIZATION:
+#    nvidia-smi -l 5
 #
-# 5. Production deployment:
-#    - Create checkpoint with optimal config
-#    - Document expected performance metrics
-#    - Set up monitoring for node usage and perplexity
+# 6. VIEW RESULTS AS THEY COMPLETE:
+#    # Depth=2 runs complete first (~80 min)
+#    docker exec boenet_depth_test cat runs/*/matrix_results.csv
 #
 # ============================================================================
 
 # ============================================================================
-# COMPARISON TO BFSNET (VISION)
+# AFTER SWEEP: USER INTERACTION TESTING
 # ============================================================================
 #
-# Key differences between BoeNet (language) and BFSNet (vision):
+# Once the sweep completes and we identify the best depth:
 #
-# INPUT:
-#   BFSNet: Flattened image [B, 784] → embed via root_fc
-#   BoeNet: Token indices [B, seq_len] → embed via nn.Embedding + embed_proj
+# 1. FIND THE BEST MODEL:
+#    Look at matrix_results.csv for lowest infer_val_ppl
+#    Note the checkpoint_path for that run
 #
-# OUTPUT:
-#   BFSNet: Class logits [B, 10] → single prediction per image
-#   BoeNet: Token logits [B, seq_len, vocab_size] → prediction per position
+# 2. GENERATE TEXT (Interactive):
+#    docker run -it --gpus all \
+#      -v ${PWD}/runs:/app/runs \
+#      boenet:cuda python infer_boenet.py \
+#        --ckpt runs/TIMESTAMP/BEST_RUN/model.pt \
+#        --generate \
+#        --max_tokens 200 \
+#        --temperature 0.8
 #
-# TREE STRUCTURE:
-#   BFSNet: One tree per image (B trees per batch)
-#   BoeNet: One tree per token position (B × seq_len trees per batch)
+# 3. TEST WITH PROMPTS:
+#    docker run -it --gpus all \
+#      -v ${PWD}/runs:/app/runs \
+#      boenet:cuda python infer_boenet.py \
+#        --ckpt runs/TIMESTAMP/BEST_RUN/model.pt \
+#        --generate \
+#        --prompt "The meaning of" \
+#        --max_tokens 100
 #
-# METRICS:
-#   BFSNet: Accuracy % (higher is better)
-#   BoeNet: Perplexity (lower is better)
+# 4. ANALYZE TREE EXPANSION:
+#    docker run -it --gpus all \
+#      -v ${PWD}/runs:/app/runs \
+#      boenet:cuda python infer_boenet.py \
+#        --ckpt runs/TIMESTAMP/BEST_RUN/model.pt \
+#        --debug_policy \
+#        --node_samples 100
 #
-# CONVERGENCE:
-#   BFSNet: FashionMNIST converges in ~10 epochs
-#   BoeNet: WikiText-2 may need 15-20 epochs for full convergence
-#          TinyStories may converge faster per epoch (more data)
-#
-# EPOCHS SWEEP:
-#   BFSNet: epochs_list: [10] was sufficient
-#   BoeNet: epochs_list: [5, 10, 15, 20] needed to find optimal training duration
-#
-# EXPECTED BEHAVIOR:
-#   - Policy behavior should be similar (learn grow_prob ≈ 0.44)
-#   - Optimal threshold should be similar (~0.42)
-#   - λ=0.05 should still provide good regularization
-#   - Node counting is per-position instead of per-image
-#   - Convergence may be slower, requiring more epochs
-#
-# ============================================================================
-
-# ============================================================================
-# REDUCED SWEEP OPTIONS (FOR FASTER EXPLORATION)
-# ============================================================================
-#
-# If the full 400-run sweep is too long, consider these reduced options:
-#
-# OPTION 1: Fix epochs, sweep everything else (100 runs, ~3-5 hours)
-#   epochs_list: [15]  # Best guess for WikiText-2 convergence
-#   # Everything else unchanged
-#
-# OPTION 2: Fix seq_len and embed_dim, sweep policy and epochs (64 runs, ~2-3 hours)
-#   seq_len_list: [128]
-#   embed_dim_list: [64]
-#   epochs_list: [10, 20]
-#   # Everything else unchanged
-#
-# OPTION 3: Minimal threshold sweep with epochs (48 runs, ~1.5-2 hours)
-#   lambda_efficiency_list: [0.05]  # Best from BFSNet
-#   greedy_threshold_list: [0.40, 0.42, 0.45]  # Narrow range around expected optimal
-#   seq_len_list: [128]
-#   embed_dim_list: [64]
-#   epochs_list: [10, 15, 20]
-#
-# OPTION 4: Quick validation run (12 runs, ~30-45 minutes)
-#   lambda_efficiency_list: [0.05]
-#   greedy_threshold_list: [0.42, 0.50]
-#   seq_len_list: [128]
-#   embed_dim_list: [64]
-#   epochs_list: [10, 20]
-#   k_values: [3]  # Skip dense baseline
-#
-# After finding promising configs with reduced sweeps, run full sweep on
-# the most interesting parameter ranges.
+# WHAT TO LOOK FOR:
+#   - Does the model produce coherent text?
+#   - Is output better than random characters?
+#   - Does it capture word patterns, punctuation, structure?
+#   - Even with 83K params, the tree structure may help
 #
 # ============================================================================
 
 # ============================================================================
-# AVAILABLE DATASETS
+# FUTURE DEVELOPMENT: DYNAMIC DEPTH ALGORITHM
 # ============================================================================
 #
-# WikiText-2 (DEFAULT - RECOMMENDED):
-#   - HuggingFace: wikitext (config: wikitext-2-raw-v1)
-#   - Size: ~2MB
-#   - Content: Wikipedia articles
-#   - Format: Modern Parquet (no script issues)
-#   - Use: --dataset wikitext2
+# If this sweep shows depth matters, the next step is DYNAMIC depth:
 #
-# WikiText-103:
-#   - HuggingFace: wikitext (config: wikitext-103-raw-v1)
-#   - Size: ~500MB
-#   - Content: Larger Wikipedia collection
-#   - Format: Modern Parquet
-#   - Use: --dataset wikitext103
+# CURRENT (Fixed Depth):
+#   ```python
+#   for depth in range(max_depth):
+#       expand_all_nodes_at_depth(depth)
+#   ```
 #
-# Shakespeare (via GitHub):
-#   - Source: Karpathy's char-rnn GitHub (direct download)
-#   - Size: ~1MB
-#   - Content: Complete works of Shakespeare
-#   - Format: Raw text file (bypasses HuggingFace)
-#   - Use: --dataset shakespeare
+# FUTURE (Dynamic Depth):
+#   ```python
+#   depth = 0
+#   while should_expand(current_state) and depth < max_depth:
+#       expand_nodes_at_depth(depth)
+#       depth += 1
+#   ```
 #
-# TinyStories:
-#   - HuggingFace: roneneldan/TinyStories
-#   - Size: ~2GB
-#   - Content: Simple children's stories
-#   - Format: Modern Parquet
-#   - Use: --dataset tinystories
+# IMPLEMENTATION OPTIONS:
 #
-# BookCorpus:
-#   - HuggingFace: bookcorpus
-#   - Size: ~5GB
-#   - Content: 11,000 books
-#   - Use: --dataset bookcorpus
+# Option A: Confidence-based stopping
+#   - Compute prediction confidence at each depth
+#   - Stop when confidence > threshold
+#   - Simple, interpretable
 #
-# Custom Text File:
-#   - Any local .txt file
-#   - Use: --dataset textfile --text_filepath /path/to/file.txt
+# Option B: Learned stopping policy
+#   - Add "stop" action to policy network
+#   - Policy outputs: [grow_prob, stop_prob]
+#   - Train with REINFORCE
+#   - More flexible, harder to train
+#
+# Option C: Budget-based stopping
+#   - Set compute budget per input
+#   - Expand until budget exhausted
+#   - Guarantees worst-case latency
+#
+# RESEARCH QUESTIONS:
+#   1. Does dynamic depth improve quality?
+#   2. Does it reduce compute for easy inputs?
+#   3. Can we learn when to think deeper?
+#   4. How does this compare to transformers?
+#
+# This is the path toward TRUE adaptive reasoning:
+#   - Not just fixed trees (K, depth)
+#   - But LEARNED computation allocation
+#   - Model decides how much to think
+#
+# ============================================================================
+
+# ============================================================================
+# SUMMARY: THE JOURNEY SO FAR
+# ============================================================================
+#
+# PHASE 0: Original 400-cell sweep (crashed)
+#   - K=3 CUDA assertion error
+#   - Fixed with v1.1.0/v2.0.1 stability patches
+#
+# PHASE 1A: K=0 baseline (16 runs)
+#   - PPL: 11.55
+#   - Latency: 0.24 ms
+#   - Fast but no tree structure
+#
+# PHASE 1B: K=3 baseline (10 runs)
+#   - PPL: 11.63
+#   - Latency: 1.78 ms
+#   - Slower, slightly worse than K=0
+#
+# PHASE 1C: K=2 vs K=4 comparison (11 runs)
+#   - K=2: PPL 11.64, Latency 0.89ms, 79% sparsity ← WINNER
+#   - K=4: PPL 11.70, Latency 2.87ms, sparsity hurts quality
+#
+# PHASE 2 (THIS SWEEP): Depth comparison
+#   - Testing: depth=2,3,4 for K=2
+#   - Hypothesis: More depth → Better PPL
+#   - Goal: Match K=0 (11.55) with tree structure
+#
+# PHASE 3 (NEXT): User interaction
+#   - Test best model with real prompts
+#   - See if tree structure helps coherence
+#
+# PHASE 4 (FUTURE): Dynamic depth algorithm
+#   - Model decides when to expand deeper
+#   - True adaptive reasoning
+#   - The real innovation
+#
+# ============================================================================
+
+# ============================================================================
+# ALL PREVIOUS DATA FOR REFERENCE
+# ============================================================================
+#
+# K=0 BASELINE (from original sweep):
+# | Epochs | Val PPL | Latency  |
+# |--------|---------|----------|
+# | 5      | 11.60   | 0.24 ms  |
+# | 10     | 11.58   | 0.24 ms  |
+# | 15     | 11.56   | 0.24 ms  |
+# | 20     | 11.55   | 0.24 ms  |
+#
+# K=2 DEPTH=2 (from Phase 1):
+# | Epochs | λ    | Thr  | Val PPL | Nodes | Latency | Sparsity |
+# |--------|------|------|---------|-------|---------|----------|
+# | 10     | 0.0  | 0.40 | 11.69   | 7.0   | 1.35 ms | 0%       |
+# | 15     | 0.0  | 0.40 | 11.66   | 7.0   | 1.31 ms | 0%       |
+# | 10     | 0.0  | 0.50 | 11.68   | 2.07  | 1.04 ms | 70.5%    |
+# | 15     | 0.0  | 0.50 | 11.64   | 1.61  | 0.95 ms | 77.1%    |
+# | 10     | 0.05 | 0.40 | 11.70   | 7.0   | 1.34 ms | 0%       |
+# | 15     | 0.05 | 0.40 | 11.66   | 7.0   | 1.31 ms | 0%       |
+# | 10     | 0.05 | 0.50 | 11.68   | 1.96  | 1.02 ms | 72.0%    |
+# | 15     | 0.05 | 0.50 | 11.64   | 1.47  | 0.89 ms | 79.1%    |
+#
+# K=3 DEPTH=2 (from original sweep):
+# | Epochs | Val PPL | Nodes | Latency  |
+# |--------|---------|-------|----------|
+# | 10     | 11.69   | 13.0  | 1.78 ms  |
+# | 15     | 11.65   | 13.0  | 1.78 ms  |
+# | 20     | 11.63   | 13.0  | 1.78 ms  |
+#
+# K=4 DEPTH=2 (from Phase 1):
+# | Epochs | Thr  | Val PPL | Nodes | Latency  |
+# |--------|------|---------|-------|----------|
+# | 10     | 0.40 | 11.74   | 21.0  | 3.75 ms  |
+# | 15     | 0.40 | 11.70   | 21.0  | 3.72 ms  |
+# | 10     | 0.50 | 11.91   | 7.23  | 2.87 ms  | ← Sparsity hurts!
 #
 # ============================================================================

@@ -1,143 +1,110 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-train_boenet.py (v2.0.1 - Language Model)
+train_boenet.py (v3.1.0 - True BFS Language Model)
 
-Train BoeNet on WikiText-2/Shakespeare/TinyStories with REINFORCE Policy Gradients
+Train BoeNet on WikiText-2/Shakespeare/TinyStories with True BFS and REINFORCE
 
-v2.0.1 Changes (Bug Fixes for K>0 Training)
--------------------------------------------
-FIXED:
-  - Added NaN detection helper functions
-  - Added NaN checks after model forward pass
-  - Added separate gradient clipping for policy network (more aggressive)
-  - Added NaN gradient detection before optimizer.step()
-  - Added early stopping if too many NaN batches occur
-  - Added --policy_grad_clip command line argument
+v3.1.0 Critical Fixes (2026-01-01) - Tree Expansion During Training
+-------------------------------------------------------------------
+ISSUE FIXED:
+  Trees never expanded during training - always showed:
+    [True BFS] Avg nodes/position: 0.00 | Avg depth: 0.00
+    [Depth Distribution] d0:100.0%
 
-The CUDA error "Assertion `0 <= p4 && p4 <= 1` failed" was caused by:
-  1. Policy network producing NaN due to gradient explosion
-  2. NaN propagating to torch.bernoulli() in model.py
-  3. GPU detecting invalid probability values
+ROOT CAUSES:
+  1. Stochastic rollouts not actually creating tree structures
+  2. Policy outputs near threshold boundary led to no expansion
+  3. Node counting didn't properly aggregate across rollouts
+  4. model.py depth embedding dominated policy decisions
 
-These training script changes work in conjunction with fixes in:
-  - boenet/model.py v1.1.0 (probability clamping)
-  - boenet/utils/gating.py v2.1.0 (logit clamping)
-  - boenet/losses.py v1.1.0 (reward scaling)
+FIXES APPLIED:
+  1. Added --min_explore_prob parameter (default 0.1) for epsilon-greedy exploration
+     This is passed to model.py v2.2.0 which forces expansion with probability 0.1
+  2. Added per-epoch expansion rate tracking and logging
+  3. Added WARNING if tree never expands in an epoch (indicates problem)
+  4. Improved node count aggregation across rollouts
+  5. Added debug mode for detailed rollout logging
 
-Converted from train_fmnist_bfs.py (Vision) to train_boenet.py (Language)
---------------------------------------------------------------------------
-This script trains a BoeNet language model on character-level text data.
-The core training loop (REINFORCE, rollouts, policy loss) is identical
-to BFSNet - only the data loading and metrics change.
+v3.0.0 Features (Preserved):
+  - True BFS level-by-level expansion (not per-node)
+  - NaN detection on outputs, policy_loss, and gradients
+  - Separate gradient clipping for policy network
+  - BFS tree verification logging
+  - Updated theoretical max calculations for binary trees
+  - Depth tracking and logging
 
-Key Changes from train_fmnist_bfs.py:
--------------------------------------
-REMOVED:
-  - FashionMNIST data loading
-  - Accuracy metrics
-  - Classification loss (cross-entropy on logits)
-  - Image flattening utilities (_ensure_flat_784)
-  - FASHION_CLASSES
-  - Augmentation parameters (aug_pad, aug_hflip, no_normalize)
+v2.0.1 Features (Preserved):
+  - NaN detection helper functions
+  - NaN checks after model forward pass
+  - Separate gradient clipping for policy network
+  - NaN gradient detection before optimizer.step()
+  - Early stopping if too many NaN batches occur
 
-ADDED:
-  - WikiText-2/Shakespeare/TinyStories data loading
-  - Perplexity metrics (exp(cross_entropy_loss))
-  - Next-token prediction loss
-  - Character tokenization
-  - seq_len, vocab_size, embed_dim parameters
-  - Text generation capabilities
+TRUE BFS KEY INSIGHT:
+  In True BFS, decisions are made per LEVEL, not per node:
+  - The policy makes ONE decision per level
+  - If level L expands, ALL 2^L nodes at level L create children
+  - This guarantees a BALANCED binary tree
+  - Gradient paths are O(log n) instead of O(n)
 
-UNCHANGED:
-  - REINFORCE policy gradients
-  - Multiple rollouts mechanism
-  - Greedy threshold handling
-  - Policy loss computation
-  - Learning rate scheduling
-  - Checkpoint saving
-  - Node counting and sparsity metrics
+NODE COUNTING (v3.0.0):
+  For a balanced binary tree with depth D:
+  - Nodes at level L: 2^L
+  - Total nodes up to level D: 2^(D+1) - 1
+  
+  Examples:
+  - depth=0 (root only): 1 node
+  - depth=1: 3 nodes (1 + 2)
+  - depth=2: 7 nodes (1 + 2 + 4)
+  - depth=3: 15 nodes (1 + 2 + 4 + 8)
+  - depth=4: 31 nodes (1 + 2 + 4 + 8 + 16)
 
-v2.0.0 Dataset Changes:
------------------------
-  - Default dataset changed from shakespeare to wikitext2
-  - WikiText-2 uses modern HuggingFace Parquet format (no script issues)
-  - Shakespeare now downloads directly from Karpathy's GitHub
-  - Added wikitext103, bookcorpus, openwebtext options
+SPARSITY METRICS (v3.0.0):
+  - nodes_per_position: Average nodes per token position
+  - depth_reached: Actual tree depth achieved
+  - sparsity_ratio: nodes_used / max_possible_nodes
 
-v2.0.0 Greedy Threshold (same as BFSNet v2.0.0)
------------------------------------------------
-The greedy_threshold parameter controls inference sparsity:
-  - threshold = 0.50 (default): Conservative, often root-only
-  - threshold = 0.42-0.45: Balanced, partial expansion
-  - threshold = 0.30-0.35: Aggressive, near-full expansion
-
-Training Loop (v2.0.1):
+Training Loop (v3.0.0):
   1. Forward: outputs, policy_loss, rewards, node_counts = model(x, labels=y, ...)
-  2. NaN check on outputs and policy_loss (v2.0.1)
+  2. NaN check on outputs and policy_loss
   3. Language modeling loss: CE(outputs, y) where y is shifted input
   4. Total loss: lm_loss + beta_policy * policy_loss
-  5. Backward with NaN gradient detection (v2.0.1)
-  6. Separate gradient clipping for policy network (v2.0.1)
-  7. Log: perplexity, policy loss, avg nodes/position, rewards
+  5. Backward with NaN gradient detection
+  6. Separate gradient clipping for policy network
+  7. Log: perplexity, policy loss, avg nodes/position, depth reached
 
-Metrics:
+Metrics (v3.0.0):
   - Perplexity = exp(cross_entropy_loss)
   - Lower perplexity = better model
   - Random baseline: PPL = vocab_size (256 for char-level)
-
-Node Counting Metrics (v2.0.0):
-  - node_counts: List[int] from model.forward(), one int per rollout
-  - Each int is total nodes created for the ENTIRE BATCH in that rollout
-  - For language models, this is across all token positions
-  - avg_nodes_per_position: Total nodes / (batch_size * seq_len * num_rollouts)
+  - Depth reached: Computed from node count for balanced tree
+  - Sparsity: Actual nodes / max possible nodes
 
 Usage Examples:
 ---------------
 # Basic training on WikiText-2 (DEFAULT):
 python3 train_boenet.py --epochs 10 --dataset wikitext2
 
-# Training on Shakespeare (via GitHub download):
-python3 train_boenet.py --epochs 10 --dataset shakespeare
-
-# Training with custom hyperparameters:
+# Training with True BFS depth sweep:
 python3 train_boenet.py \\
     --epochs 20 \\
-    --seq_len 128 \\
-    --embed_dim 64 \\
-    --hidden_dim 128 \\
-    --max_depth 2 \\
-    --max_children 3 \\
+    --max_depth 4 \\
+    --max_children 2 \\
     --lambda_efficiency 0.05 \\
     --greedy_threshold 0.42
 
-# Training on TinyStories (larger dataset):
-python3 train_boenet.py --dataset tinystories --epochs 5
+# Training with v3.1.0 epsilon-greedy exploration:
+python3 train_boenet.py \\
+    --epochs 20 \\
+    --max_depth 3 \\
+    --min_explore_prob 0.15
 
-# Training on custom text file:
-python3 train_boenet.py --dataset textfile --text_filepath path/to/text.txt
-
-# Training with aggressive policy gradient clipping (for stability):
-python3 train_boenet.py --policy_grad_clip 0.25 --grad_clip 1.0
-
-Greedy Threshold Selection Guide:
----------------------------------
-The greedy_threshold parameter controls which grow decisions pass during
-inference. This is CRITICAL for v2.0.0 models.
-
-PROBLEM: Policy learns grow_prob ≈ 0.40-0.50 during training, but default
-         threshold=0.5 blocks most decisions → root-only inference.
-
-SOLUTION: Set threshold based on learned distribution:
-  - threshold = 0.50: Root-only (max efficiency, higher PPL)
-  - threshold = 0.42-0.45: Balanced (~6-8 nodes, lower PPL)
-  - threshold = 0.30-0.35: Dense (~10-13 nodes, lowest PPL)
-
-WORKFLOW:
-  1. Train with default settings
-  2. Run: python3 infer_boenet.py --ckpt <path> --debug_policy
-  3. Note the mean_grow_prob from output
-  4. Retrain with: --greedy_threshold <mean_grow_prob - 0.03>
+# Training with BFS verification logging:
+python3 train_boenet.py \\
+    --debug_node_counts \\
+    --debug_bfs_verify \\
+    --epochs 5
 
 Available Datasets:
 -------------------
@@ -149,9 +116,9 @@ Available Datasets:
   openwebtext: ~40GB web text
   textfile:    Custom local text file
 
-Author: BoeNet project (converted from BFSNet)
-Version: 2.0.1
-Date: 2025-12-30
+Author: BoeNet project
+Version: 3.1.0
+Date: 2026-01-01
 """
 
 from __future__ import annotations
@@ -178,16 +145,49 @@ except Exception:
 # Model
 from boenet.model import BoeNet
 
+# BFS indexing functions (v3.0.0)
+from boenet.model import (
+    get_total_nodes_up_to_level,
+    get_level,
+    get_nodes_at_level,
+)
+
+# Try to import get_num_nodes_at_level, fall back to local implementation
+try:
+    from boenet.model import get_num_nodes_at_level
+except ImportError:
+    def get_num_nodes_at_level(level: int) -> int:
+        """Return number of nodes at a given level in balanced binary tree."""
+        return 1 << level  # 2^level
+
 # Data
 from boenet.utils.data_utils import (
     get_dataloaders,
     SplitConfig,
-    CharTokenizer,
     set_seed,
 )
 
-# Losses
-from boenet.losses import compute_perplexity
+# Losses (v2.0.0 True BFS)
+from boenet.losses import (
+    compute_perplexity,
+)
+
+# Try to import True BFS specific functions
+try:
+    from boenet.losses import (
+        compute_rewards_true_bfs,
+        compute_depth_from_nodes,
+        get_nodes_for_depth,
+    )
+except ImportError:
+    # Fallback implementations
+    def compute_depth_from_nodes(num_nodes: int) -> int:
+        if num_nodes <= 0:
+            return 0
+        return max(0, int(math.floor(math.log2(num_nodes + 1))) - 1)
+    
+    def get_nodes_for_depth(depth: int) -> int:
+        return (1 << (depth + 1)) - 1
 
 # Optional: pruning losses (kept for backwards compatibility)
 try:
@@ -205,7 +205,7 @@ except Exception:
 
 
 # --------------------------------------------------------------------------- #
-#                         Module-level logger (v2.0.1)                        #
+#                         Module-level logger                                 #
 # --------------------------------------------------------------------------- #
 logger = logging.getLogger(__name__)
 
@@ -294,6 +294,145 @@ def check_tensor_for_nan(tensor: torch.Tensor, name: str, step_name: str = "") -
 
 
 # --------------------------------------------------------------------------- #
+#                   True BFS Node Counting Helpers (v3.0.0)                   #
+# --------------------------------------------------------------------------- #
+
+def compute_depth_from_total_nodes(total_nodes: int) -> int:
+    """
+    Compute the depth of a complete binary tree from total node count.
+    
+    For a complete binary tree:
+    - depth 0: 1 node
+    - depth 1: 3 nodes
+    - depth 2: 7 nodes
+    - depth 3: 15 nodes
+    - depth 4: 31 nodes
+    
+    Formula: nodes = 2^(depth+1) - 1
+    Inverse: depth = floor(log2(nodes + 1)) - 1
+    
+    Parameters
+    ----------
+    total_nodes : int
+        Total number of nodes in the tree.
+        
+    Returns
+    -------
+    int
+        Depth of the tree (0 for root only).
+    """
+    if total_nodes <= 0:
+        return 0
+    # For complete binary tree: nodes = 2^(depth+1) - 1
+    # So: depth = log2(nodes + 1) - 1
+    return max(0, int(math.floor(math.log2(total_nodes + 1))) - 1)
+
+
+def compute_theoretical_max_nodes(max_depth: int) -> int:
+    """
+    Compute theoretical maximum nodes for a complete binary tree.
+    
+    Parameters
+    ----------
+    max_depth : int
+        Maximum tree depth.
+        
+    Returns
+    -------
+    int
+        Maximum possible nodes: 2^(max_depth+1) - 1.
+    """
+    if max_depth < 0:
+        return 1
+    return (1 << (max_depth + 1)) - 1  # 2^(max_depth+1) - 1
+
+
+def format_tree_structure(depth: int) -> str:
+    """
+    Format a visual representation of the tree structure.
+    
+    Parameters
+    ----------
+    depth : int
+        Tree depth to visualize.
+        
+    Returns
+    -------
+    str
+        ASCII representation of tree.
+    """
+    lines = []
+    nodes_for_depth = (1 << (depth + 1)) - 1  # get_nodes_for_depth equivalent
+    lines.append(f"Depth {depth} Tree (Total: {nodes_for_depth} nodes):")
+    
+    for level in range(depth + 1):
+        num_nodes = 1 << level  # 2^level
+        node_indices = list(range((1 << level) - 1, (1 << (level + 1)) - 1))
+        lines.append(f"  Level {level}: {num_nodes} nodes (indices {node_indices[0]}-{node_indices[-1]})")
+    
+    return "\n".join(lines)
+
+
+def verify_balanced_tree(node_counts: List[int], batch_size: int, seq_len: int, max_depth: int) -> Dict[str, Any]:
+    """
+    Verify that node counts are consistent with balanced binary trees.
+    
+    In True BFS, each rollout should produce a balanced tree where:
+    - nodes_per_position is one of: 1, 3, 7, 15, 31, ... (2^(d+1) - 1)
+    
+    Parameters
+    ----------
+    node_counts : List[int]
+        Node counts from each rollout.
+    batch_size : int
+        Batch size.
+    seq_len : int
+        Sequence length.
+    max_depth : int
+        Maximum tree depth.
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Verification results including:
+        - is_valid: bool
+        - depths: List[int] - depth reached per rollout
+        - nodes_per_position: List[float]
+        - warnings: List[str]
+    """
+    num_positions = batch_size * seq_len
+    valid_node_counts = [(1 << (d + 1)) - 1 for d in range(max_depth + 1)]
+    
+    result = {
+        "is_valid": True,
+        "depths": [],
+        "nodes_per_position": [],
+        "warnings": [],
+    }
+    
+    for rollout_idx, total_nodes in enumerate(node_counts):
+        nodes_per_pos = total_nodes / num_positions
+        result["nodes_per_position"].append(nodes_per_pos)
+        
+        # Compute depth from nodes per position
+        depth = compute_depth_from_total_nodes(int(round(nodes_per_pos)))
+        result["depths"].append(depth)
+        
+        # Check if nodes_per_position is close to a valid balanced tree count
+        closest_valid = min(valid_node_counts, key=lambda x: abs(x - nodes_per_pos))
+        tolerance = 0.1 * closest_valid  # 10% tolerance for floating point
+        
+        if abs(nodes_per_pos - closest_valid) > tolerance:
+            result["is_valid"] = False
+            result["warnings"].append(
+                f"Rollout {rollout_idx}: nodes_per_pos={nodes_per_pos:.2f} "
+                f"not close to any valid count {valid_node_counts}"
+            )
+    
+    return result
+
+
+# --------------------------------------------------------------------------- #
 #                                Small utilities                              #
 # --------------------------------------------------------------------------- #
 
@@ -349,10 +488,12 @@ def _flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "pooling_mode",
         # Language model specific
         "vocab_size", "seq_len", "dataset", "stride", "text_filepath",
-        # v2.0.0 policy parameters
+        # Policy parameters
         "num_rollouts", "lambda_efficiency", "beta_entropy", "beta_policy",
         "greedy_threshold",
-        # v2.0.1 policy gradient clipping
+        # v3.1.0: Epsilon-greedy exploration
+        "min_explore_prob",
+        # Policy gradient clipping
         "policy_grad_clip",
         # Pruning losses
         "prune_l1_weight", "prune_kl_weight", "prune_keep_rate",
@@ -360,8 +501,8 @@ def _flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "opt", "momentum", "nesterov", "adamw_beta1", "adamw_beta2", "adamw_eps",
         # LR schedule
         "lr_schedule", "lr_step_size", "lr_gamma",
-        # Debug
-        "debug_node_counts",
+        # Debug (v3.0.0)
+        "debug_node_counts", "debug_bfs_verify",
     ]
     for k in passthru:
         if k in cfg:
@@ -371,19 +512,19 @@ def _flatten_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     nested_map = {
         "training": ["epochs", "lr", "weight_decay", "grad_clip", "seed", "policy_grad_clip"],
         "model": ["hidden_dim", "embed_dim", "max_depth", "max_children", 
-                  "no_sibling_embed", "greedy_threshold", "vocab_size"],
+                  "no_sibling_embed", "greedy_threshold", "vocab_size", "min_explore_prob"],
         "data": ["seq_len", "dataset", "stride", "batch_size", "val_ratio", "text_filepath"],
         "pruning": ["use_pruning", "pruning_mode", "pruning_threshold"],
         "dataloader": ["num_workers", "pin_memory"],
         "save": ["save_path", "data_root"],
         "run": ["cpu", "pooling_mode"],
         "policy": ["num_rollouts", "lambda_efficiency", "beta_entropy", 
-                   "beta_policy", "greedy_threshold", "policy_grad_clip"],
+                   "beta_policy", "greedy_threshold", "policy_grad_clip", "min_explore_prob"],
         "losses": ["prune_l1_weight", "prune_kl_weight", "prune_keep_rate"],
         "optimizer": ["opt", "momentum", "nesterov", "adamw_beta1", 
                       "adamw_beta2", "adamw_eps"],
         "lr": ["lr_schedule", "lr_step_size", "lr_gamma"],
-        "debug": ["debug_node_counts"],
+        "debug": ["debug_node_counts", "debug_bfs_verify"],
     }
     for section, keys in nested_map.items():
         if section in cfg and isinstance(cfg[section], dict):
@@ -428,9 +569,12 @@ def evaluate(
     model: nn.Module,
     device: torch.device,
     vocab_size: int,
-) -> Tuple[float, float]:
+    max_depth: int,
+) -> Tuple[float, float, float, float]:
     """
     Evaluate model on validation set.
+    
+    v3.0.0: Returns additional metrics for True BFS.
     
     Parameters
     ----------
@@ -442,15 +586,19 @@ def evaluate(
         Device to run on.
     vocab_size : int
         Vocabulary size (for reference).
+    max_depth : int
+        Maximum tree depth.
     
     Returns
     -------
-    Tuple[float, float]
-        (val_loss, val_perplexity)
+    Tuple[float, float, float, float]
+        (val_loss, val_perplexity, avg_nodes_per_pos, avg_depth)
     """
     model.eval()
     total_loss = 0.0
     total_tokens = 0
+    total_nodes = 0
+    num_batches = 0
     
     for input_ids, labels in loader:
         input_ids = input_ids.to(device)
@@ -459,7 +607,7 @@ def evaluate(
         # Forward pass (greedy inference)
         logits = model(input_ids)  # [B, seq_len, vocab_size]
         
-        # v2.0.1: Check for NaN in logits during evaluation
+        # Check for NaN in logits during evaluation
         if torch.isnan(logits).any():
             logger.warning("[Eval] NaN detected in logits. Skipping batch.")
             continue
@@ -471,18 +619,28 @@ def evaluate(
         
         loss = F.cross_entropy(logits_flat, labels_flat, reduction='sum')
         
-        # v2.0.1: Check for NaN in loss
+        # Check for NaN in loss
         if torch.isnan(loss):
             logger.warning("[Eval] NaN detected in loss. Skipping batch.")
             continue
         
         total_loss += loss.item()
         total_tokens += labels.numel()
+        
+        # For inference, we assume the model uses its internal node counting
+        # Since we're in eval mode, the model uses greedy threshold
+        # We can estimate nodes from model.max_nodes or just track batches
+        num_batches += 1
     
     avg_loss = total_loss / max(1, total_tokens)
     perplexity = compute_perplexity(avg_loss)
     
-    return avg_loss, perplexity
+    # For inference metrics, we'd need to modify the model to return node counts
+    # For now, return placeholders
+    avg_nodes_per_pos = 0.0  # Would need model modification to track
+    avg_depth = 0.0
+    
+    return avg_loss, perplexity, avg_nodes_per_pos, avg_depth
 
 
 # --------------------------------------------------------------------------- #
@@ -491,9 +649,20 @@ def evaluate(
 
 def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     """
-    Main training function for BoeNet language model.
+    Main training function for BoeNet language model with True BFS.
     
-    v2.0.1 includes:
+    v3.1.0 includes:
+    - Epsilon-greedy exploration via min_explore_prob parameter
+    - Warning if trees never expand during an epoch
+    - Improved expansion tracking and logging
+    
+    v3.0.0 includes:
+    - True BFS node counting for balanced binary trees
+    - BFS tree verification logging
+    - Depth tracking per rollout
+    - Updated sparsity metrics
+    
+    v2.0.1 features (preserved):
     - NaN detection on outputs, policy_loss, and gradients
     - Separate gradient clipping for policy network
     - Early stopping on repeated NaN batches
@@ -524,56 +693,42 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         logger.info(f"[device] GPU: {torch.cuda.get_device_name(0)}")
     
     # ==========================================================================
-    # WARNING: Greedy Threshold Mismatch Issue (same as BFSNet v2.0.0)
+    # v3.1.0: True BFS Information Banner (Updated)
     # ==========================================================================
-    if args.greedy_threshold == 0.5 and args.max_children > 0:
-        print("\n" + "=" * 79)
-        print("⚠️  WARNING: Default greedy_threshold=0.5 May Result in Root-Only Inference!")
-        print("=" * 79)
-        print("ISSUE:")
-        print("  The policy typically learns grow_prob values around 0.40-0.50 during")
-        print("  training. With the default greedy threshold of 0.5, most decisions")
-        print("  will FAIL the threshold check, resulting in ZERO children created.")
-        print()
-        print("EXPECTED BEHAVIOR:")
-        print("  - Training mode: Uses ~6-12 nodes (stochastic Bernoulli sampling)")
-        print("  - Inference mode: Uses 1 node (root-only, greedy threshold blocks growth)")
-        print()
-        print("RECOMMENDATION:")
-        print("  1. After training, run with --debug_policy to measure learned grow_prob:")
-        print(f"     python3 infer_boenet.py --ckpt {args.save_path} --debug_policy --cpu")
-        print()
-        print("  2. Then retrain with threshold ≈ mean_grow_prob - 0.03:")
-        print("     Example: If mean_grow_prob = 0.445, use --greedy_threshold 0.42")
-        print()
-        print("  3. Or use training matrix to sweep (λ, threshold) pairs:")
-        print("     python3 boenet_training_matrix.py --config configs/threshold_sweep.yaml")
-        print()
-        print("See docs/architecture.md for detailed analysis.")
-        print("=" * 79 + "\n")
-    # ==========================================================================
+    print("\n" + "=" * 79)
+    print("🌳 BoeNet v3.1.0 - True BFS Language Model (Training Expansion Fix)")
+    print("=" * 79)
+    print()
+    print("TRUE BFS ARCHITECTURE:")
+    print("  - Decisions made per LEVEL (not per node)")
+    print("  - Balanced binary tree guaranteed")
+    print("  - O(log n) gradient paths (not O(n))")
+    print()
+    print(f"CONFIGURATION:")
+    print(f"  max_depth        = {args.max_depth}")
+    print(f"  max_children     = {args.max_children} (True BFS uses binary trees)")
+    print(f"  greedy_thresh    = {args.greedy_threshold}")
+    print(f"  min_explore_prob = {args.min_explore_prob} (v3.1.0 epsilon-greedy)")
+    print()
     
-    # ==========================================================================
-    # v2.0.1: K>0 Training Warning
-    # ==========================================================================
-    if args.max_children > 0:
-        print("\n" + "=" * 79)
-        print("ℹ️  INFO: Training with K>0 (BFS Tree Expansion)")
-        print("=" * 79)
-        print(f"  max_children (K) = {args.max_children}")
-        print(f"  max_depth        = {args.max_depth}")
-        print(f"  policy_grad_clip = {args.policy_grad_clip}")
-        print()
-        print("v2.0.1 includes stability fixes for K>0 training:")
-        print("  - Probability clamping in model.py")
-        print("  - Logit clamping in gating.py")
-        print("  - Reward scaling in losses.py")
-        print("  - Separate policy gradient clipping (this script)")
-        print()
-        print("If you still encounter CUDA assertion errors, try:")
-        print(f"  --policy_grad_clip {args.policy_grad_clip / 2}")
-        print(f"  --lr {args.lr / 2}")
-        print("=" * 79 + "\n")
+    # v3.1.0: Explain epsilon-greedy
+    print("v3.1.0 EPSILON-GREEDY EXPLORATION:")
+    print(f"  During training, with probability {args.min_explore_prob:.0%}, the model")
+    print("  will force tree expansion regardless of policy output.")
+    print("  This ensures trees actually expand during training.")
+    print()
+    
+    # Show tree structure for configured depth
+    theoretical_max = compute_theoretical_max_nodes(args.max_depth)
+    print(f"TREE STRUCTURE (max_depth={args.max_depth}):")
+    print(f"  Theoretical max nodes per position: {theoretical_max}")
+    print()
+    for d in range(args.max_depth + 1):
+        nodes = (1 << (d + 1)) - 1  # get_nodes_for_depth equivalent
+        print(f"    depth={d}: {nodes:3d} nodes  (levels 0-{d})")
+    print()
+    print("  True BFS guarantees one of these exact node counts per position.")
+    print("=" * 79 + "\n")
     # ==========================================================================
     
     # ==========================================================================
@@ -606,7 +761,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     print(f"[data] Random baseline perplexity: {random_ppl:.2f}")
     
     # ==========================================================================
-    # Model Creation
+    # Model Creation (v3.1.0: Pass min_explore_prob to model)
     # ==========================================================================
     model = BoeNet(
         vocab_size=vocab_size,
@@ -615,6 +770,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         max_depth=args.max_depth,
         max_children=args.max_children,
         greedy_threshold=args.greedy_threshold,
+        min_explore_prob=args.min_explore_prob,  # v3.1.0: Epsilon-greedy
         sibling_embed=not args.no_sibling_embed,
         use_pruning=args.use_pruning,
         pruning_mode=args.pruning_mode,
@@ -625,6 +781,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     # Log model info
     print(f"\n{model.summary()}")
     print(f"[model] Parameters: {model.num_parameters():,}")
+    print(f"[model] max_nodes (per position): {model.max_nodes}")
     print(f"[dims] Language Model: vocab_size={vocab_size}, embed_dim={args.embed_dim}, "
           f"hidden_dim={args.hidden_dim}, seq_len={args.seq_len}")
     print(
@@ -634,26 +791,33 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         f"λ_eff={args.lambda_efficiency}, β_ent={args.beta_entropy}, "
         f"β_policy={args.beta_policy}\n"
         f"      greedy_threshold={args.greedy_threshold} (inference)\n"
-        f"      policy_grad_clip={args.policy_grad_clip} (v2.0.1)\n"
+        f"      min_explore_prob={args.min_explore_prob} (v3.1.0 epsilon-greedy)\n"
+        f"      policy_grad_clip={args.policy_grad_clip}\n"
         f"      pooling_mode={args.pooling_mode}\n"
         f"      pruning losses: L1*={args.prune_l1_weight}, "
         f"KL*={args.prune_kl_weight} (keep_rate={args.prune_keep_rate})"
     )
     
-    # Compute theoretical maximum nodes for reference
-    if args.max_children > 0 and args.max_depth > 0:
-        theoretical_max_per_position = sum(
-            args.max_children ** d for d in range(args.max_depth + 1)
-        )
-    else:
-        theoretical_max_per_position = 1  # Just root
+    # ==========================================================================
+    # v3.0.0: True BFS Node Metrics
+    # ==========================================================================
+    theoretical_max_per_position = compute_theoretical_max_nodes(args.max_depth)
     
     print(
-        f"[node metrics] Theoretical max nodes per token position per rollout: {theoretical_max_per_position}\n"
-        f"               With {args.num_rollouts} rollouts: {theoretical_max_per_position * args.num_rollouts} total\n"
-        f"               Batch-level max (B={args.batch_size}, seq_len={args.seq_len}): "
-        f"{theoretical_max_per_position * args.batch_size * args.seq_len} per rollout"
+        f"\n[True BFS Node Metrics]\n"
+        f"  Theoretical max nodes per position: {theoretical_max_per_position}\n"
+        f"  With {args.num_rollouts} rollouts: {theoretical_max_per_position * args.num_rollouts} total per position\n"
+        f"  Batch-level max (B={args.batch_size}, seq_len={args.seq_len}):\n"
+        f"    Per rollout: {theoretical_max_per_position * args.batch_size * args.seq_len:,}\n"
+        f"    Total: {theoretical_max_per_position * args.batch_size * args.seq_len * args.num_rollouts:,}"
     )
+    
+    # Show valid node counts for debugging
+    print(f"\n  Valid node counts per position (balanced tree):")
+    for d in range(args.max_depth + 1):
+        nodes = (1 << (d + 1)) - 1
+        print(f"    depth={d}: {nodes} nodes")
+    print()
     
     # ==========================================================================
     # Optimizer & Scheduler
@@ -693,7 +857,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     t0_total = time.perf_counter()
     
     # ==========================================================================
-    # v2.0.1: Identify policy parameters for separate gradient clipping
+    # Identify policy parameters for separate gradient clipping
     # ==========================================================================
     policy_param_names = set()
     policy_params = []
@@ -706,8 +870,8 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         else:
             other_params.append(param)
     
-    logger.info(f"[v2.0.1] Policy parameters ({len(policy_params)}): {list(policy_param_names)}")
-    logger.info(f"[v2.0.1] Other parameters: {len(other_params)}")
+    logger.info(f"[Policy Params] {len(policy_params)} parameters: {list(policy_param_names)}")
+    logger.info(f"[Other Params] {len(other_params)} parameters")
     
     # ==========================================================================
     # Training Loop
@@ -724,17 +888,30 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         total_policy_loss = 0.0
         total_tokens = 0
         
-        # Node counting
+        # ==========================================================================
+        # v3.0.0: True BFS Node Counting
+        # ==========================================================================
         total_nodes_across_all_rollouts = 0
         positions_seen = 0
         
-        # v2.0.1: NaN tracking for early stopping
+        # Track depth distribution (v3.0.0)
+        depth_counts = {d: 0 for d in range(args.max_depth + 1)}
+        
+        # v3.1.0: Track if any expansion happened this epoch
+        expansion_happened_this_epoch = False
+        
+        # NaN tracking for early stopping
         nan_batch_count = 0
         max_nan_batches = max(len(train_loader) // 10, 5)  # Allow up to 10% NaN batches
         skipped_batches = 0
         
+        # Debug collections
         if args.debug_node_counts:
             all_rollout_node_counts = []
+            all_depths = []
+        
+        # BFS verification (v3.0.0)
+        bfs_verification_warnings = []
         
         for batch_idx, (input_ids, labels) in enumerate(train_loader):
             input_ids = input_ids.to(device)  # [B, seq_len]
@@ -743,7 +920,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             optimizer.zero_grad()
             
             # ==================================================================
-            # v2.0.1 FORWARD with NaN detection
+            # FORWARD with NaN detection
             # ==================================================================
             try:
                 outputs, policy_loss, rewards, node_counts = model(
@@ -766,9 +943,11 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
                     raise
             
             # outputs: [B, seq_len, vocab_size]
+            B = input_ids.size(0)
+            seq_len_batch = input_ids.size(1)
             
             # ==================================================================
-            # v2.0.1: Check for NaN in outputs
+            # Check for NaN in outputs
             # ==================================================================
             if check_tensor_for_nan(outputs, "outputs", f"batch_{batch_idx}"):
                 logger.warning(f"[Batch {batch_idx}] NaN in outputs. Skipping batch.")
@@ -780,7 +959,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
                 continue
             
             # ==================================================================
-            # v2.0.1: Check for NaN in policy loss
+            # Check for NaN in policy loss
             # ==================================================================
             if torch.isnan(policy_loss):
                 logger.warning(f"[Batch {batch_idx}] NaN policy loss. Using zero.")
@@ -788,13 +967,13 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
                 nan_batch_count += 1
             
             # Language modeling loss (cross-entropy)
-            B, seq_len, V = outputs.shape
+            V = outputs.size(-1)
             outputs_flat = outputs.view(-1, V)     # [B*seq_len, vocab_size]
             labels_flat = labels.view(-1)          # [B*seq_len]
             lm_loss = F.cross_entropy(outputs_flat, labels_flat)
             
             # ==================================================================
-            # v2.0.1: Check for NaN in LM loss
+            # Check for NaN in LM loss
             # ==================================================================
             if torch.isnan(lm_loss):
                 logger.warning(f"[Batch {batch_idx}] NaN LM loss. Skipping batch.")
@@ -812,7 +991,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             total_loss_batch.backward()
             
             # ==================================================================
-            # v2.0.1: Check for NaN in gradients BEFORE clipping
+            # Check for NaN in gradients BEFORE clipping
             # ==================================================================
             if check_for_nan_in_gradients(model, f"batch_{batch_idx}"):
                 logger.warning(f"[Batch {batch_idx}] NaN gradients. Zeroing and skipping.")
@@ -825,27 +1004,19 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
                 continue
             
             # ==================================================================
-            # v2.0.1: Separate gradient clipping for policy network
+            # Separate gradient clipping for policy network
             # ==================================================================
             if args.grad_clip and args.grad_clip > 0:
                 # Clip policy gradients more aggressively
                 if policy_params and args.policy_grad_clip > 0:
-                    policy_grad_norm = torch.nn.utils.clip_grad_norm_(
-                        policy_params, args.policy_grad_clip
-                    )
-                    if args.debug_node_counts and batch_idx == 0:
-                        logger.debug(f"[Batch {batch_idx}] Policy grad norm: {policy_grad_norm:.4f}")
+                    torch.nn.utils.clip_grad_norm_(policy_params, args.policy_grad_clip)
                 
                 # Clip other gradients normally
                 if other_params:
-                    other_grad_norm = torch.nn.utils.clip_grad_norm_(
-                        other_params, args.grad_clip
-                    )
-                    if args.debug_node_counts and batch_idx == 0:
-                        logger.debug(f"[Batch {batch_idx}] Other grad norm: {other_grad_norm:.4f}")
+                    torch.nn.utils.clip_grad_norm_(other_params, args.grad_clip)
             
             # ==================================================================
-            # v2.0.1: Final NaN check after clipping
+            # Final NaN check after clipping
             # ==================================================================
             has_nan_after_clip = False
             for name, param in model.named_parameters():
@@ -862,37 +1033,78 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             
             optimizer.step()
             
+            # ==================================================================
             # Book-keeping
+            # ==================================================================
             num_tokens = labels.numel()
             total_loss += total_loss_batch.item() * num_tokens
             total_lm_loss += lm_loss.item() * num_tokens
             total_policy_loss += policy_loss.item() * num_tokens
             total_tokens += num_tokens
             
-            # Node counting
+            # ==================================================================
+            # v3.0.0: True BFS Node Counting
+            # ==================================================================
+            num_positions = B * seq_len_batch
             total_nodes_this_batch = sum(node_counts)
             total_nodes_across_all_rollouts += total_nodes_this_batch
-            positions_seen += B * seq_len  # Token positions
+            positions_seen += num_positions
             
+            # Track depth for each rollout
+            for nc in node_counts:
+                nodes_per_pos = nc / num_positions
+                depth = compute_depth_from_total_nodes(int(round(nodes_per_pos)))
+                depth = min(depth, args.max_depth)  # Clamp to max_depth
+                depth_counts[depth] += 1
+                
+                # v3.1.0: Check if expansion happened
+                if depth > 0:
+                    expansion_happened_this_epoch = True
+            
+            # ==================================================================
+            # v3.0.0: BFS Tree Verification (optional)
+            # ==================================================================
+            if args.debug_bfs_verify:
+                verification = verify_balanced_tree(
+                    node_counts, B, seq_len_batch, args.max_depth
+                )
+                if not verification["is_valid"]:
+                    bfs_verification_warnings.extend(verification["warnings"])
+            
+            # ==================================================================
+            # Debug logging for first batch
+            # ==================================================================
             if args.debug_node_counts and batch_idx == 0:
                 avg_per_rollout = total_nodes_this_batch / len(node_counts)
-                nodes_per_position_this_batch = total_nodes_this_batch / (B * seq_len * len(node_counts))
+                nodes_per_position_per_rollout = total_nodes_this_batch / (num_positions * len(node_counts))
+                
                 print(
-                    f"[debug nodes batch={batch_idx}]\n"
-                    f"  node_counts (per rollout for batch): {node_counts}\n"
+                    f"\n[debug nodes batch={batch_idx}]\n"
+                    f"  node_counts (per rollout): {node_counts}\n"
                     f"  sum(node_counts): {total_nodes_this_batch}\n"
-                    f"  batch_size: {B}, seq_len: {seq_len}\n"
+                    f"  batch_size: {B}, seq_len: {seq_len_batch}\n"
                     f"  num_rollouts: {len(node_counts)}\n"
-                    f"  avg_per_rollout: {avg_per_rollout:.1f}\n"
-                    f"  nodes_per_position_per_rollout: {nodes_per_position_this_batch:.2f}\n"
-                    f"  theoretical_max_per_position_per_rollout: {theoretical_max_per_position}"
+                    f"  avg nodes per rollout: {avg_per_rollout:.1f}\n"
+                    f"  nodes per position per rollout: {nodes_per_position_per_rollout:.2f}\n"
+                    f"  theoretical max per position: {theoretical_max_per_position}\n"
                 )
+                
+                # Show depth per rollout
+                for r_idx, nc in enumerate(node_counts):
+                    n_per_pos = nc / num_positions
+                    d = compute_depth_from_total_nodes(int(round(n_per_pos)))
+                    print(f"    Rollout {r_idx}: {nc} total nodes → {n_per_pos:.2f}/pos → depth={d}")
+                print()
             
             if args.debug_node_counts:
                 all_rollout_node_counts.extend(node_counts)
+                for nc in node_counts:
+                    n_per_pos = nc / num_positions
+                    d = compute_depth_from_total_nodes(int(round(n_per_pos)))
+                    all_depths.append(d)
         
         # ==================================================================
-        # v2.0.1: Check if we need to stop early due to NaN
+        # Check if we need to stop early due to NaN
         # ==================================================================
         if nan_batch_count > max_nan_batches:
             logger.error(f"[Epoch {epoch}] Stopping training due to too many NaN batches.")
@@ -905,7 +1117,9 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         if scheduler is not None:
             scheduler.step()
         
+        # ==================================================================
         # Epoch metrics
+        # ==================================================================
         if total_tokens > 0:
             train_loss = total_loss / total_tokens
             train_lm_loss = total_lm_loss / total_tokens
@@ -918,49 +1132,106 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             train_policy_loss = float('inf')
             train_ppl = float('inf')
         
+        # ==================================================================
+        # v3.0.0: True BFS Sparsity Metrics
+        # ==================================================================
         if positions_seen > 0:
-            avg_total_nodes_per_position = total_nodes_across_all_rollouts / positions_seen
+            # Average nodes per position across all rollouts
+            avg_nodes_per_position = total_nodes_across_all_rollouts / (positions_seen * args.num_rollouts)
         else:
-            avg_total_nodes_per_position = 0.0
+            avg_nodes_per_position = 0.0
         
-        theoretical_max_total_per_position = theoretical_max_per_position * args.num_rollouts
-        sparsity_ratio = avg_total_nodes_per_position / max(theoretical_max_total_per_position, 1)
+        # Sparsity ratio: actual / theoretical max
+        sparsity_pct = (avg_nodes_per_position / theoretical_max_per_position) * 100 if theoretical_max_per_position > 0 else 0.0
         
+        # Compute average depth reached
+        total_rollouts = sum(depth_counts.values())
+        if total_rollouts > 0:
+            avg_depth_reached = sum(d * c for d, c in depth_counts.items()) / total_rollouts
+        else:
+            avg_depth_reached = 0.0
+        
+        # ==================================================================
         # Validation
-        val_loss, val_ppl = evaluate(val_loader, model, device, vocab_size)
+        # ==================================================================
+        val_loss, val_ppl, _, _ = evaluate(val_loader, model, device, vocab_size, args.max_depth)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_val_ppl = val_ppl
             best_epoch = epoch
         
+        # ==================================================================
+        # Print epoch summary
+        # ==================================================================
         print(
             f"  Train Loss: {train_loss:.4f} (lm={train_lm_loss:.4f}, "
             f"policy={train_policy_loss:.4f}) | Val Loss: {val_loss:.4f}\n"
             f"  Train PPL: {train_ppl:.2f} | Val PPL: {val_ppl:.2f} | "
-            f"Avg Total Nodes/Position: {avg_total_nodes_per_position:.2f}\n"
-            f"  (Sparsity: {sparsity_ratio:.2%} of theoretical max {theoretical_max_total_per_position} nodes)"
+            f"Avg Nodes/Position: {avg_nodes_per_position:.2f}"
+        )
+        print(
+            f"  [True BFS] Avg nodes/position: {avg_nodes_per_position:.2f} | "
+            f"Avg depth: {avg_depth_reached:.2f} | "
+            f"Sparsity: {sparsity_pct:.1f}% of max {theoretical_max_per_position}"
         )
         
-        # v2.0.1: Log NaN statistics
-        if nan_batch_count > 0:
-            print(f"  [v2.0.1] NaN batches this epoch: {nan_batch_count}, Skipped: {skipped_batches}")
+        # Print depth distribution
+        print(f"  [Depth Distribution] ", end="")
+        for d in range(args.max_depth + 1):
+            if depth_counts[d] > 0:
+                pct = 100.0 * depth_counts[d] / total_rollouts
+                print(f"d{d}:{pct:.1f}% ", end="")
+        print()
         
+        # ==================================================================
+        # v3.1.0: Warning if no expansion happened
+        # ==================================================================
+        if not expansion_happened_this_epoch and args.max_children > 0 and args.max_depth > 0:
+            print(
+                f"  ⚠️  WARNING: No tree expansion occurred this epoch!\n"
+                f"      Trees stayed at depth=0 for all {total_rollouts} rollouts.\n"
+                f"      This may indicate:\n"
+                f"        - min_explore_prob={args.min_explore_prob} is too low\n"
+                f"        - Policy is saturated to 'no expand' decisions\n"
+                f"      Consider increasing --min_explore_prob (e.g., 0.15 or 0.2)"
+            )
+        
+        # Log NaN statistics
+        if nan_batch_count > 0:
+            print(f"  [NaN] Batches with issues: {nan_batch_count}, Skipped: {skipped_batches}")
+        
+        # BFS verification warnings
+        if args.debug_bfs_verify and bfs_verification_warnings:
+            print(f"  [BFS Verify] {len(bfs_verification_warnings)} warnings:")
+            for w in bfs_verification_warnings[:5]:  # Show first 5
+                print(f"    - {w}")
+            if len(bfs_verification_warnings) > 5:
+                print(f"    ... and {len(bfs_verification_warnings) - 5} more")
+        
+        # Debug node statistics
         if args.debug_node_counts and all_rollout_node_counts:
             import statistics
             min_nodes = min(all_rollout_node_counts)
             max_nodes = max(all_rollout_node_counts)
             median_nodes = statistics.median(all_rollout_node_counts)
             stddev_nodes = statistics.stdev(all_rollout_node_counts) if len(all_rollout_node_counts) > 1 else 0
+            
             print(
-                f"  [node stats] min={min_nodes}, max={max_nodes}, "
+                f"  [Node Stats] min={min_nodes}, max={max_nodes}, "
                 f"median={median_nodes:.1f}, stddev={stddev_nodes:.1f}"
             )
+            
+            if all_depths:
+                depth_dist = {}
+                for d in all_depths:
+                    depth_dist[d] = depth_dist.get(d, 0) + 1
+                print(f"  [Depth Stats] distribution: {depth_dist}")
         
         epoch_time = time.perf_counter() - t0
         epoch_times_s.append(float(epoch_time))
         
         # ==================================================================
-        # v2.0.1: Check model parameters for NaN at end of epoch
+        # Check model parameters for NaN at end of epoch
         # ==================================================================
         if check_for_nan_in_model(model, f"epoch_{epoch}_end"):
             logger.error(f"[Epoch {epoch}] Model parameters contain NaN. Stopping training.")
@@ -977,7 +1248,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     ckpt = {
         "model_state_dict": model.state_dict(),
         "config": {
-            # Language model specific (NEW keys for v2.0.0)
+            # Language model specific
             "vocab_size": vocab_size,
             "embed_dim": args.embed_dim,
             "hidden_dim": args.hidden_dim,
@@ -987,20 +1258,23 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             "max_depth": args.max_depth,
             "max_children": args.max_children,
             "greedy_threshold": args.greedy_threshold,
+            "min_explore_prob": args.min_explore_prob,  # v3.1.0
             "sibling_embed": not args.no_sibling_embed,
             "use_pruning": args.use_pruning,
             "pruning_mode": args.pruning_mode,
             "pruning_threshold": args.pruning_threshold,
             "pooling_mode": args.pooling_mode,
-            # v2.0.0 policy parameters
+            # Policy parameters
             "num_rollouts": args.num_rollouts,
             "lambda_efficiency": args.lambda_efficiency,
             "beta_entropy": args.beta_entropy,
             "beta_policy": args.beta_policy,
-            # v2.0.1 additions
             "policy_grad_clip": args.policy_grad_clip,
-            "version": "2.0.1",
+            # v3.1.0 additions
+            "version": "3.1.0",
             "model_type": "language",
+            "bfs_type": "true_bfs",
+            "theoretical_max_nodes": theoretical_max_per_position,
         },
         "training_meta": {
             "best_val_loss": best_val_loss,
@@ -1019,58 +1293,39 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     # POST-TRAINING RECOMMENDATIONS
     # ==========================================================================
     print("\n" + "=" * 79)
-    print("POST-TRAINING: Greedy Threshold Tuning Recommendations")
+    print("POST-TRAINING: True BFS Analysis and Recommendations")
     print("=" * 79)
     print()
-    print("Your model was trained with:")
+    print("Your model was trained with True BFS v3.1.0:")
     print(f"  dataset           = {args.dataset}")
+    print(f"  max_depth         = {args.max_depth}")
     print(f"  lambda_efficiency = {args.lambda_efficiency}")
     print(f"  greedy_threshold  = {args.greedy_threshold}")
-    print(f"  policy_grad_clip  = {args.policy_grad_clip} (v2.0.1)")
+    print(f"  min_explore_prob  = {args.min_explore_prob} (v3.1.0 epsilon-greedy)")
     print(f"  best_val_ppl      = {best_val_ppl:.2f}")
+    print()
+    print("TRUE BFS v3.1.0 FEATURES:")
+    print("  ✓ Balanced binary trees (no uneven growth)")
+    print("  ✓ O(log n) gradient paths (stable training)")
+    print("  ✓ Predictable node counts (powers of 2 minus 1)")
+    print("  ✓ Epsilon-greedy exploration ensures tree expansion during training")
     print()
     print("NEXT STEPS:")
     print()
-    print("1. Measure the learned grow_prob distribution:")
+    print("1. Run inference with depth analysis:")
     print(f"   python3 infer_boenet.py --ckpt {args.save_path} \\")
-    print(f"       --debug_policy --node_samples 1000 --cpu")
+    print(f"       --debug_policy --node_samples 1000")
     print()
-    print("   This will show you:")
-    print("   - Mean grow_prob (typically 0.40-0.50)")
-    print("   - % of decisions above threshold 0.5")
-    print("   - Distribution histogram")
-    print()
-    print("2. Based on the measured mean_grow_prob, choose optimal threshold:")
-    print()
-    print("   If mean_grow_prob ≈ 0.445, recommended settings:")
-    print("     • threshold = 0.50 → Root-only (1 node, higher PPL)")
-    print("     • threshold = 0.42 → Balanced (~6-8 nodes, lower PPL)")
-    print("     • threshold = 0.35 → Dense (~10-12 nodes, lowest PPL)")
-    print()
-    print("   General rule: optimal_threshold ≈ mean_grow_prob - 0.03")
-    print()
-    print("3. Generate text with the trained model:")
+    print("2. Generate text:")
     print(f"   python3 infer_boenet.py --ckpt {args.save_path} \\")
     print(f"       --generate --max_tokens 200 --temperature 0.8")
     print()
-    print("4. Compare to random baseline:")
-    print(f"   Random PPL = {random_ppl:.2f} (vocab_size)")
+    print("3. Compare to baseline:")
+    print(f"   Random PPL = {random_ppl:.2f}")
     print(f"   Your PPL   = {best_val_ppl:.2f}")
     if best_val_ppl > 0 and best_val_ppl < float('inf'):
         print(f"   Improvement: {(random_ppl / best_val_ppl):.2f}x better")
     print()
-    print("EMPIRICAL FINDINGS:")
-    print("  • Higher λ (0.05) often gives BETTER perplexity than lower λ (0.01)")
-    print("  • Policy learns grow_prob ≈ 0.44-0.45 regardless of λ value")
-    print("  • Default threshold=0.5 typically results in root-only inference")
-    print("  • Root-only still achieves reasonable PPL (language patterns learned)")
-    print()
-    print("v2.0.1 STABILITY NOTES:")
-    print("  • If training was unstable, try reducing --policy_grad_clip")
-    print("  • The fixes in model.py, gating.py, and losses.py should prevent")
-    print("    CUDA assertion failures from invalid probabilities")
-    print()
-    print("See docs/architecture.md for complete analysis and recommendations.")
     print("=" * 79 + "\n")
     # ==========================================================================
     
@@ -1096,6 +1351,8 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             "max_children": int(args.max_children),
             "pooling_mode": args.pooling_mode,
             "greedy_threshold": float(args.greedy_threshold),
+            "min_explore_prob": float(args.min_explore_prob),  # v3.1.0
+            "theoretical_max_nodes": int(theoretical_max_per_position),
         },
         "policy": {
             "num_rollouts": int(args.num_rollouts),
@@ -1108,8 +1365,12 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             "best_val_loss": float(best_val_loss) if best_val_loss != float('inf') else None,
             "best_val_ppl": float(best_val_ppl) if best_val_ppl != float('inf') else None,
             "best_epoch": int(best_epoch),
-            "final_val_ppl": float(val_ppl) if 'val_ppl' in dir() and val_ppl != float('inf') else None,
             "random_baseline_ppl": float(random_ppl),
+        },
+        "true_bfs": {
+            "avg_nodes_per_position": float(avg_nodes_per_position) if 'avg_nodes_per_position' in dir() else None,
+            "avg_depth_reached": float(avg_depth_reached) if 'avg_depth_reached' in dir() else None,
+            "sparsity_pct": float(sparsity_pct) if 'sparsity_pct' in dir() else None,
         },
         "time": {
             "total_s": float(total_time_s),
@@ -1119,7 +1380,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         "artifacts": {
             "checkpoint": args.save_path,
         },
-        "version": "2.0.1",
+        "version": "3.1.0",
     }
     
     try:
@@ -1136,7 +1397,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Train BoeNet v2.0.1 Language Model with REINFORCE policy gradients",
+        description="Train BoeNet v3.1.0 True BFS Language Model with REINFORCE",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1144,66 +1405,47 @@ Examples:
 # Train on WikiText-2 (DEFAULT):
 python3 train_boenet.py --epochs 10 --dataset wikitext2
 
-# Train on Shakespeare:
-python3 train_boenet.py --epochs 10 --dataset shakespeare
-
-# Train on TinyStories:
-python3 train_boenet.py --epochs 5 --dataset tinystories
-
-# Train on custom text file:
-python3 train_boenet.py --dataset textfile --text_filepath path/to/text.txt --epochs 10
-
-# Custom hyperparameters:
+# Train with True BFS depth 4:
 python3 train_boenet.py \\
-    --seq_len 128 \\
-    --embed_dim 64 \\
-    --hidden_dim 128 \\
-    --max_depth 2 \\
-    --max_children 3 \\
-    --lambda_efficiency 0.05 \\
-    --greedy_threshold 0.42 \\
-    --epochs 20
+    --epochs 20 \\
+    --max_depth 4 \\
+    --max_children 2 \\
+    --lambda_efficiency 0.05
 
-# v2.0.1: Training with custom policy gradient clipping:
+# Train with v3.1.0 epsilon-greedy exploration:
 python3 train_boenet.py \\
-    --max_children 3 \\
-    --policy_grad_clip 0.25 \\
-    --grad_clip 1.0
+    --epochs 20 \\
+    --max_depth 3 \\
+    --min_explore_prob 0.15
+
+# Train with BFS verification logging:
+python3 train_boenet.py \\
+    --debug_node_counts \\
+    --debug_bfs_verify \\
+    --epochs 5
+
+True BFS Architecture:
+----------------------
+  v3.1.0 uses True BFS with per-LEVEL decisions:
+  - Decisions made per level, not per node
+  - Balanced binary tree guaranteed
+  - O(log n) gradient paths
+  - Epsilon-greedy exploration ensures tree expansion during training
+  
+  Node counts for balanced trees:
+    depth=0: 1 node   (root only)
+    depth=1: 3 nodes  (1 + 2)
+    depth=2: 7 nodes  (1 + 2 + 4)
+    depth=3: 15 nodes (1 + 2 + 4 + 8)
+    depth=4: 31 nodes (1 + 2 + 4 + 8 + 16)
 
 Available Datasets:
 -------------------
   wikitext2:   ~2MB Wikipedia (DEFAULT, RECOMMENDED)
   wikitext103: ~500MB Wikipedia
-  shakespeare: ~1MB literary text (via GitHub)
+  shakespeare: ~1MB literary text
   tinystories: ~2GB children's stories
-  bookcorpus:  ~5GB books
-  openwebtext: ~40GB web text
   textfile:    Custom local text file
-
-Greedy Threshold Selection Guide:
----------------------------------
-The greedy_threshold parameter controls which grow decisions pass during
-inference. This is CRITICAL for v2.0.0 models.
-
-PROBLEM: Policy learns grow_prob ≈ 0.40-0.50 during training, but default
-         threshold=0.5 blocks most decisions → root-only inference.
-
-SOLUTION: Set threshold based on learned distribution:
-  - threshold = 0.50: Root-only (max efficiency, higher PPL)
-  - threshold = 0.42-0.45: Balanced (~6-8 nodes, lower PPL)
-  - threshold = 0.30-0.35: Dense (~10-13 nodes, lowest PPL)
-
-WORKFLOW:
-  1. Train with default settings
-  2. Run: python3 infer_boenet.py --ckpt <path> --debug_policy
-  3. Note the mean_grow_prob from output
-  4. Retrain with: --greedy_threshold <mean_grow_prob - 0.03>
-
-v2.0.1 Stability Notes:
------------------------
-  - Added --policy_grad_clip for separate policy gradient clipping
-  - Added NaN detection throughout training loop
-  - Works with fixed model.py, gating.py, losses.py
 
 See docs/architecture.md for detailed analysis.
         """
@@ -1235,15 +1477,15 @@ See docs/architecture.md for detailed analysis.
     p.add_argument("--pin_memory", type=str2bool, nargs="?", const=True, default=False,
                    help="Pin memory for data loader")
     
-    # Model Architecture (Language Model Specific)
+    # Model Architecture
     p.add_argument("--embed_dim", type=int, default=64,
                    help="Token embedding dimension")
     p.add_argument("--hidden_dim", type=int, default=128,
                    help="Hidden dimension for BFS tree nodes")
     p.add_argument("--max_depth", type=int, default=2,
-                   help="Maximum BFS tree depth")
-    p.add_argument("--max_children", type=int, default=3,
-                   help="Maximum children per node")
+                   help="Maximum BFS tree depth (True BFS uses binary trees)")
+    p.add_argument("--max_children", type=int, default=2,
+                   help="Maximum children per node (True BFS uses 2)")
     p.add_argument("--no_sibling_embed", type=str2bool, nargs="?", const=True, default=False,
                    help="Disable sibling embeddings")
     p.add_argument("--pooling_mode", type=str, default="mean", 
@@ -1259,27 +1501,25 @@ See docs/architecture.md for detailed analysis.
     p.add_argument("--pruning_threshold", type=float, default=1e-3,
                    help="Pruning threshold")
     
-    # v2.0.0 Policy Gradient Parameters
+    # Policy Gradient Parameters
     p.add_argument("--num_rollouts", type=int, default=3,
                    help="Number of rollouts per input for exploration (1-5)")
     p.add_argument("--lambda_efficiency", type=float, default=0.05,
-                   help="Node count penalty in reward (0.0-0.1). Higher = stronger efficiency pressure. "
-                        "NOTE: λ=0.05 often gives BETTER perplexity than λ=0.01 (acts as regularization)")
+                   help="Node count penalty in reward (0.0-0.1)")
     p.add_argument("--beta_entropy", type=float, default=0.01,
                    help="Entropy bonus in policy loss (0.001-0.01)")
     p.add_argument("--beta_policy", type=float, default=0.5,
                    help="Policy loss weight in total loss (0.1-1.0)")
     p.add_argument("--greedy_threshold", type=float, default=0.5,
-                   help="Threshold for greedy inference decisions (0.3-0.5). "
-                        "CRITICAL: Default 0.5 often results in root-only inference! "
-                        "Recommended: 0.42-0.45 based on learned grow_prob. "
-                        "Run with --debug_policy after training to measure optimal value.")
+                   help="Threshold for greedy inference decisions (0.3-0.5)")
     
-    # v2.0.1: Policy gradient clipping
+    # v3.1.0: Epsilon-greedy exploration
+    p.add_argument("--min_explore_prob", type=float, default=0.1,
+                   help="v3.1.0: Minimum probability to force tree expansion during training (0.0-0.3)")
+    
+    # Policy gradient clipping
     p.add_argument("--policy_grad_clip", type=float, default=0.5,
-                   help="Gradient clipping specifically for policy network (default: 0.5). "
-                        "Policy gradients can be larger than LM gradients due to REINFORCE variance. "
-                        "Lower values (0.25) may help stability for K>0 training.")
+                   help="Gradient clipping for policy network (default: 0.5)")
     
     # Pruning losses
     p.add_argument("--prune_l1_weight", type=float, default=0.0,
@@ -1297,7 +1537,7 @@ See docs/architecture.md for detailed analysis.
     p.add_argument("--weight_decay", type=float, default=0.0,
                    help="Weight decay")
     p.add_argument("--grad_clip", type=float, default=1.0,
-                   help="Gradient clipping norm for non-policy parameters (0 to disable)")
+                   help="Gradient clipping norm (0 to disable)")
     
     # SGD-specific
     p.add_argument("--momentum", type=float, default=0.9,
@@ -1333,9 +1573,11 @@ See docs/architecture.md for detailed analysis.
     p.add_argument("--save_path", type=str, default="checkpoints/boenet_wikitext2.pt",
                    help="Path to save checkpoint")
     
-    # Debug
+    # Debug (v3.0.0)
     p.add_argument("--debug_node_counts", type=str2bool, nargs="?", const=True, default=False,
-                   help="Enable detailed node count logging for debugging")
+                   help="Enable detailed node count logging")
+    p.add_argument("--debug_bfs_verify", type=str2bool, nargs="?", const=True, default=False,
+                   help="Enable BFS tree verification (checks balanced tree property)")
     
     return p
 
