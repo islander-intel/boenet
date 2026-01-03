@@ -1,9 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-train_boenet.py (v3.1.0 - True BFS Language Model)
+train_boenet.py (v3.2.0 - True BFS Language Model with Fixed Node Counting)
 
 Train BoeNet on WikiText-2/Shakespeare/TinyStories with True BFS and REINFORCE
+
+v3.2.0 Critical Fix (2026-01-03) - Node Count Metric Reporting
+--------------------------------------------------------------
+ISSUE FIXED:
+  avg_nodes_per_position was showing 0.0 in CSV despite trees actually expanding.
+  Logs showed correct expansion (e.g., total_nodes=7) but metrics reported 0.0.
+
+ROOT CAUSE:
+  The model's node_counts returns the TREE STRUCTURE node count per rollout
+  (e.g., 7 for a depth-2 tree), NOT multiplied by batch positions.
+  
+  The old calculation was:
+    avg_nodes_per_position = total_nodes_across_all_rollouts / (positions_seen * num_rollouts)
+    = 15 / (8192 * 3) = 0.0006 ≈ 0.0  # WRONG!
+  
+  The correct calculation is:
+    avg_nodes_per_position = sum(node_counts) / len(node_counts)
+    = 15 / 3 = 5.0  # Average tree size across rollouts
+
+FIX APPLIED:
+  1. node_counts from model = [tree_size_rollout_0, tree_size_rollout_1, ...]
+     where tree_size is 1, 3, 7, 15, 31 for depth 0, 1, 2, 3, 4
+  2. avg_nodes_per_position = mean of node_counts across all rollouts in epoch
+  3. Updated depth calculation to use node_counts directly (not divided by positions)
+  4. Added detailed logging to verify node counting
 
 v3.1.0 Critical Fixes (2026-01-01) - Tree Expansion During Training
 -------------------------------------------------------------------
@@ -48,21 +73,22 @@ TRUE BFS KEY INSIGHT:
   - This guarantees a BALANCED binary tree
   - Gradient paths are O(log n) instead of O(n)
 
-NODE COUNTING (v3.0.0):
-  For a balanced binary tree with depth D:
-  - Nodes at level L: 2^L
-  - Total nodes up to level D: 2^(D+1) - 1
+NODE COUNTING (v3.2.0 - CORRECTED):
+  The model returns node_counts as a list where each element is the
+  TREE STRUCTURE SIZE for that rollout:
   
-  Examples:
-  - depth=0 (root only): 1 node
-  - depth=1: 3 nodes (1 + 2)
-  - depth=2: 7 nodes (1 + 2 + 4)
-  - depth=3: 15 nodes (1 + 2 + 4 + 8)
-  - depth=4: 31 nodes (1 + 2 + 4 + 8 + 16)
+  - depth=0 (root only): 1 node per position
+  - depth=1: 3 nodes per position (1 + 2)
+  - depth=2: 7 nodes per position (1 + 2 + 4)
+  - depth=3: 15 nodes per position (1 + 2 + 4 + 8)
+  - depth=4: 31 nodes per position (1 + 2 + 4 + 8 + 16)
+  
+  These are NOT multiplied by batch_size * seq_len. They represent
+  the tree structure that is applied to EACH token position.
 
-SPARSITY METRICS (v3.0.0):
-  - nodes_per_position: Average nodes per token position
-  - depth_reached: Actual tree depth achieved
+SPARSITY METRICS (v3.2.0):
+  - nodes_per_position: Average tree size across rollouts (1, 3, 7, 15, 31)
+  - depth_reached: Actual tree depth achieved (0, 1, 2, 3, 4)
   - sparsity_ratio: nodes_used / max_possible_nodes
 
 Training Loop (v3.0.0):
@@ -117,8 +143,8 @@ Available Datasets:
   textfile:    Custom local text file
 
 Author: BoeNet project
-Version: 3.1.0
-Date: 2026-01-01
+Version: 3.2.0
+Date: 2026-01-03
 """
 
 from __future__ import annotations
@@ -294,12 +320,15 @@ def check_tensor_for_nan(tensor: torch.Tensor, name: str, step_name: str = "") -
 
 
 # --------------------------------------------------------------------------- #
-#                   True BFS Node Counting Helpers (v3.0.0)                   #
+#                   True BFS Node Counting Helpers (v3.2.0)                   #
 # --------------------------------------------------------------------------- #
 
-def compute_depth_from_total_nodes(total_nodes: int) -> int:
+def compute_depth_from_tree_nodes(tree_nodes: int) -> int:
     """
-    Compute the depth of a complete binary tree from total node count.
+    Compute the depth of a complete binary tree from its node count.
+    
+    v3.2.0: This function takes the TREE STRUCTURE node count (1, 3, 7, 15, 31)
+    and returns the depth (0, 1, 2, 3, 4).
     
     For a complete binary tree:
     - depth 0: 1 node
@@ -313,19 +342,21 @@ def compute_depth_from_total_nodes(total_nodes: int) -> int:
     
     Parameters
     ----------
-    total_nodes : int
-        Total number of nodes in the tree.
+    tree_nodes : int
+        Number of nodes in the tree structure (1, 3, 7, 15, 31, ...).
         
     Returns
     -------
     int
         Depth of the tree (0 for root only).
     """
-    if total_nodes <= 0:
+    if tree_nodes <= 0:
+        return 0
+    if tree_nodes == 1:
         return 0
     # For complete binary tree: nodes = 2^(depth+1) - 1
     # So: depth = log2(nodes + 1) - 1
-    return max(0, int(math.floor(math.log2(total_nodes + 1))) - 1)
+    return max(0, int(math.floor(math.log2(tree_nodes + 1))) - 1)
 
 
 def compute_theoretical_max_nodes(max_depth: int) -> int:
@@ -373,21 +404,19 @@ def format_tree_structure(depth: int) -> str:
     return "\n".join(lines)
 
 
-def verify_balanced_tree(node_counts: List[int], batch_size: int, seq_len: int, max_depth: int) -> Dict[str, Any]:
+def verify_balanced_tree(node_counts: List[int], max_depth: int) -> Dict[str, Any]:
     """
     Verify that node counts are consistent with balanced binary trees.
     
+    v3.2.0: Updated to work with tree structure node counts directly.
+    
     In True BFS, each rollout should produce a balanced tree where:
-    - nodes_per_position is one of: 1, 3, 7, 15, 31, ... (2^(d+1) - 1)
+    - node count is one of: 1, 3, 7, 15, 31, ... (2^(d+1) - 1)
     
     Parameters
     ----------
     node_counts : List[int]
-        Node counts from each rollout.
-    batch_size : int
-        Batch size.
-    seq_len : int
-        Sequence length.
+        Node counts from each rollout (tree structure size, not multiplied by positions).
     max_depth : int
         Maximum tree depth.
         
@@ -397,37 +426,31 @@ def verify_balanced_tree(node_counts: List[int], batch_size: int, seq_len: int, 
         Verification results including:
         - is_valid: bool
         - depths: List[int] - depth reached per rollout
-        - nodes_per_position: List[float]
         - warnings: List[str]
     """
-    num_positions = batch_size * seq_len
     valid_node_counts = [(1 << (d + 1)) - 1 for d in range(max_depth + 1)]
     
     result = {
         "is_valid": True,
         "depths": [],
-        "nodes_per_position": [],
         "warnings": [],
     }
     
-    for rollout_idx, total_nodes in enumerate(node_counts):
-        nodes_per_pos = total_nodes / num_positions
-        result["nodes_per_position"].append(nodes_per_pos)
-        
-        # Compute depth from nodes per position
-        depth = compute_depth_from_total_nodes(int(round(nodes_per_pos)))
+    for rollout_idx, tree_nodes in enumerate(node_counts):
+        # Compute depth from tree node count
+        depth = compute_depth_from_tree_nodes(tree_nodes)
         result["depths"].append(depth)
         
-        # Check if nodes_per_position is close to a valid balanced tree count
-        closest_valid = min(valid_node_counts, key=lambda x: abs(x - nodes_per_pos))
-        tolerance = 0.1 * closest_valid  # 10% tolerance for floating point
-        
-        if abs(nodes_per_pos - closest_valid) > tolerance:
-            result["is_valid"] = False
-            result["warnings"].append(
-                f"Rollout {rollout_idx}: nodes_per_pos={nodes_per_pos:.2f} "
-                f"not close to any valid count {valid_node_counts}"
-            )
+        # Check if tree_nodes is a valid balanced tree count
+        if tree_nodes not in valid_node_counts:
+            # Allow some tolerance for edge cases
+            closest_valid = min(valid_node_counts, key=lambda x: abs(x - tree_nodes))
+            if tree_nodes != closest_valid:
+                result["is_valid"] = False
+                result["warnings"].append(
+                    f"Rollout {rollout_idx}: tree_nodes={tree_nodes} "
+                    f"not a valid balanced tree count {valid_node_counts}"
+                )
     
     return result
 
@@ -651,6 +674,11 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     """
     Main training function for BoeNet language model with True BFS.
     
+    v3.2.0 includes:
+    - FIXED: Node count metric reporting now correctly interprets model output
+    - node_counts from model = tree structure size (1, 3, 7, 15, 31)
+    - avg_nodes_per_position = mean(node_counts) across all rollouts
+    
     v3.1.0 includes:
     - Epsilon-greedy exploration via min_explore_prob parameter
     - Warning if trees never expand during an epoch
@@ -693,10 +721,10 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         logger.info(f"[device] GPU: {torch.cuda.get_device_name(0)}")
     
     # ==========================================================================
-    # v3.1.0: True BFS Information Banner (Updated)
+    # v3.2.0: True BFS Information Banner (Updated)
     # ==========================================================================
     print("\n" + "=" * 79)
-    print("🌳 BoeNet v3.1.0 - True BFS Language Model (Training Expansion Fix)")
+    print("🌳 BoeNet v3.2.0 - True BFS Language Model (Fixed Node Count Metrics)")
     print("=" * 79)
     print()
     print("TRUE BFS ARCHITECTURE:")
@@ -716,6 +744,13 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     print(f"  During training, with probability {args.min_explore_prob:.0%}, the model")
     print("  will force tree expansion regardless of policy output.")
     print("  This ensures trees actually expand during training.")
+    print()
+    
+    # v3.2.0: Explain node counting
+    print("v3.2.0 NODE COUNT METRICS (FIXED):")
+    print("  node_counts from model = tree structure size per rollout")
+    print("  Valid values: 1 (d=0), 3 (d=1), 7 (d=2), 15 (d=3), 31 (d=4)")
+    print("  avg_nodes_per_position = mean(node_counts) across all rollouts")
     print()
     
     # Show tree structure for configured depth
@@ -799,21 +834,20 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     )
     
     # ==========================================================================
-    # v3.0.0: True BFS Node Metrics
+    # v3.2.0: True BFS Node Metrics (Updated Explanation)
     # ==========================================================================
     theoretical_max_per_position = compute_theoretical_max_nodes(args.max_depth)
     
     print(
-        f"\n[True BFS Node Metrics]\n"
+        f"\n[True BFS Node Metrics v3.2.0]\n"
         f"  Theoretical max nodes per position: {theoretical_max_per_position}\n"
-        f"  With {args.num_rollouts} rollouts: {theoretical_max_per_position * args.num_rollouts} total per position\n"
-        f"  Batch-level max (B={args.batch_size}, seq_len={args.seq_len}):\n"
-        f"    Per rollout: {theoretical_max_per_position * args.batch_size * args.seq_len:,}\n"
-        f"    Total: {theoretical_max_per_position * args.batch_size * args.seq_len * args.num_rollouts:,}"
+        f"  Model returns node_counts = [tree_size_rollout_0, tree_size_rollout_1, ...]\n"
+        f"  Each tree_size is one of: {[(1 << (d + 1)) - 1 for d in range(args.max_depth + 1)]}\n"
+        f"  avg_nodes_per_position = mean(all node_counts in epoch)"
     )
     
     # Show valid node counts for debugging
-    print(f"\n  Valid node counts per position (balanced tree):")
+    print(f"\n  Valid tree sizes (balanced binary tree):")
     for d in range(args.max_depth + 1):
         nodes = (1 << (d + 1)) - 1
         print(f"    depth={d}: {nodes} nodes")
@@ -889,10 +923,11 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         total_tokens = 0
         
         # ==========================================================================
-        # v3.0.0: True BFS Node Counting
+        # v3.2.0: FIXED Node Counting
         # ==========================================================================
-        total_nodes_across_all_rollouts = 0
-        positions_seen = 0
+        # Collect ALL node_counts from ALL rollouts in the epoch
+        # Each node_count is the TREE SIZE (1, 3, 7, 15, 31), NOT multiplied by positions
+        all_tree_sizes_this_epoch: List[int] = []
         
         # Track depth distribution (v3.0.0)
         depth_counts = {d: 0 for d in range(args.max_depth + 1)}
@@ -907,8 +942,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         
         # Debug collections
         if args.debug_node_counts:
-            all_rollout_node_counts = []
-            all_depths = []
+            debug_node_counts_per_batch = []
         
         # BFS verification (v3.0.0)
         bfs_verification_warnings = []
@@ -1043,17 +1077,16 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             total_tokens += num_tokens
             
             # ==================================================================
-            # v3.0.0: True BFS Node Counting
+            # v3.2.0: FIXED Node Counting
             # ==================================================================
-            num_positions = B * seq_len_batch
-            total_nodes_this_batch = sum(node_counts)
-            total_nodes_across_all_rollouts += total_nodes_this_batch
-            positions_seen += num_positions
+            # node_counts is a list of tree sizes, one per rollout
+            # e.g., [1, 7, 3] means rollout 0 had 1 node (depth 0),
+            #       rollout 1 had 7 nodes (depth 2), rollout 2 had 3 nodes (depth 1)
+            all_tree_sizes_this_epoch.extend(node_counts)
             
             # Track depth for each rollout
-            for nc in node_counts:
-                nodes_per_pos = nc / num_positions
-                depth = compute_depth_from_total_nodes(int(round(nodes_per_pos)))
+            for tree_size in node_counts:
+                depth = compute_depth_from_tree_nodes(tree_size)
                 depth = min(depth, args.max_depth)  # Clamp to max_depth
                 depth_counts[depth] += 1
                 
@@ -1065,43 +1098,31 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             # v3.0.0: BFS Tree Verification (optional)
             # ==================================================================
             if args.debug_bfs_verify:
-                verification = verify_balanced_tree(
-                    node_counts, B, seq_len_batch, args.max_depth
-                )
+                verification = verify_balanced_tree(node_counts, args.max_depth)
                 if not verification["is_valid"]:
                     bfs_verification_warnings.extend(verification["warnings"])
             
             # ==================================================================
-            # Debug logging for first batch
+            # Debug logging for first few batches
             # ==================================================================
-            if args.debug_node_counts and batch_idx == 0:
-                avg_per_rollout = total_nodes_this_batch / len(node_counts)
-                nodes_per_position_per_rollout = total_nodes_this_batch / (num_positions * len(node_counts))
-                
-                print(
-                    f"\n[debug nodes batch={batch_idx}]\n"
-                    f"  node_counts (per rollout): {node_counts}\n"
-                    f"  sum(node_counts): {total_nodes_this_batch}\n"
-                    f"  batch_size: {B}, seq_len: {seq_len_batch}\n"
-                    f"  num_rollouts: {len(node_counts)}\n"
-                    f"  avg nodes per rollout: {avg_per_rollout:.1f}\n"
-                    f"  nodes per position per rollout: {nodes_per_position_per_rollout:.2f}\n"
-                    f"  theoretical max per position: {theoretical_max_per_position}\n"
-                )
-                
-                # Show depth per rollout
-                for r_idx, nc in enumerate(node_counts):
-                    n_per_pos = nc / num_positions
-                    d = compute_depth_from_total_nodes(int(round(n_per_pos)))
-                    print(f"    Rollout {r_idx}: {nc} total nodes → {n_per_pos:.2f}/pos → depth={d}")
-                print()
-            
             if args.debug_node_counts:
-                all_rollout_node_counts.extend(node_counts)
-                for nc in node_counts:
-                    n_per_pos = nc / num_positions
-                    d = compute_depth_from_total_nodes(int(round(n_per_pos)))
-                    all_depths.append(d)
+                debug_node_counts_per_batch.append(node_counts)
+                
+                if batch_idx < 3:  # Log first 3 batches in detail
+                    print(
+                        f"\n[debug v3.2.0 batch={batch_idx}]\n"
+                        f"  node_counts (tree sizes per rollout): {node_counts}\n"
+                        f"  batch_size: {B}, seq_len: {seq_len_batch}\n"
+                        f"  num_rollouts: {len(node_counts)}\n"
+                        f"  mean tree size: {sum(node_counts) / len(node_counts):.2f}\n"
+                        f"  theoretical max tree size: {theoretical_max_per_position}\n"
+                    )
+                    
+                    # Show depth per rollout
+                    for r_idx, tree_size in enumerate(node_counts):
+                        d = compute_depth_from_tree_nodes(tree_size)
+                        print(f"    Rollout {r_idx}: tree_size={tree_size} → depth={d}")
+                    print()
         
         # ==================================================================
         # Check if we need to stop early due to NaN
@@ -1133,11 +1154,11 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             train_ppl = float('inf')
         
         # ==================================================================
-        # v3.0.0: True BFS Sparsity Metrics
+        # v3.2.0: FIXED Sparsity Metrics
         # ==================================================================
-        if positions_seen > 0:
-            # Average nodes per position across all rollouts
-            avg_nodes_per_position = total_nodes_across_all_rollouts / (positions_seen * args.num_rollouts)
+        if len(all_tree_sizes_this_epoch) > 0:
+            # Average tree size across all rollouts in the epoch
+            avg_nodes_per_position = sum(all_tree_sizes_this_epoch) / len(all_tree_sizes_this_epoch)
         else:
             avg_nodes_per_position = 0.0
         
@@ -1161,16 +1182,15 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             best_epoch = epoch
         
         # ==================================================================
-        # Print epoch summary
+        # Print epoch summary (v3.2.0 format)
         # ==================================================================
         print(
             f"  Train Loss: {train_loss:.4f} (lm={train_lm_loss:.4f}, "
             f"policy={train_policy_loss:.4f}) | Val Loss: {val_loss:.4f}\n"
-            f"  Train PPL: {train_ppl:.2f} | Val PPL: {val_ppl:.2f} | "
-            f"Avg Nodes/Position: {avg_nodes_per_position:.2f}"
+            f"  Train PPL: {train_ppl:.2f} | Val PPL: {val_ppl:.2f}"
         )
         print(
-            f"  [True BFS] Avg nodes/position: {avg_nodes_per_position:.2f} | "
+            f"  [True BFS v3.2.0] Avg tree size: {avg_nodes_per_position:.2f} | "
             f"Avg depth: {avg_depth_reached:.2f} | "
             f"Sparsity: {sparsity_pct:.1f}% of max {theoretical_max_per_position}"
         )
@@ -1208,24 +1228,25 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             if len(bfs_verification_warnings) > 5:
                 print(f"    ... and {len(bfs_verification_warnings) - 5} more")
         
-        # Debug node statistics
-        if args.debug_node_counts and all_rollout_node_counts:
+        # Debug node statistics (v3.2.0)
+        if args.debug_node_counts and all_tree_sizes_this_epoch:
             import statistics
-            min_nodes = min(all_rollout_node_counts)
-            max_nodes = max(all_rollout_node_counts)
-            median_nodes = statistics.median(all_rollout_node_counts)
-            stddev_nodes = statistics.stdev(all_rollout_node_counts) if len(all_rollout_node_counts) > 1 else 0
+            min_tree = min(all_tree_sizes_this_epoch)
+            max_tree = max(all_tree_sizes_this_epoch)
+            median_tree = statistics.median(all_tree_sizes_this_epoch)
+            stddev_tree = statistics.stdev(all_tree_sizes_this_epoch) if len(all_tree_sizes_this_epoch) > 1 else 0
             
             print(
-                f"  [Node Stats] min={min_nodes}, max={max_nodes}, "
-                f"median={median_nodes:.1f}, stddev={stddev_nodes:.1f}"
+                f"  [Tree Size Stats] min={min_tree}, max={max_tree}, "
+                f"median={median_tree:.1f}, stddev={stddev_tree:.1f}, "
+                f"count={len(all_tree_sizes_this_epoch)}"
             )
             
-            if all_depths:
-                depth_dist = {}
-                for d in all_depths:
-                    depth_dist[d] = depth_dist.get(d, 0) + 1
-                print(f"  [Depth Stats] distribution: {depth_dist}")
+            # Show value distribution
+            tree_size_dist = {}
+            for ts in all_tree_sizes_this_epoch:
+                tree_size_dist[ts] = tree_size_dist.get(ts, 0) + 1
+            print(f"  [Tree Size Distribution] {tree_size_dist}")
         
         epoch_time = time.perf_counter() - t0
         epoch_times_s.append(float(epoch_time))
@@ -1270,8 +1291,8 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
             "beta_entropy": args.beta_entropy,
             "beta_policy": args.beta_policy,
             "policy_grad_clip": args.policy_grad_clip,
-            # v3.1.0 additions
-            "version": "3.1.0",
+            # v3.2.0 additions
+            "version": "3.2.0",
             "model_type": "language",
             "bfs_type": "true_bfs",
             "theoretical_max_nodes": theoretical_max_per_position,
@@ -1296,7 +1317,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     print("POST-TRAINING: True BFS Analysis and Recommendations")
     print("=" * 79)
     print()
-    print("Your model was trained with True BFS v3.1.0:")
+    print("Your model was trained with True BFS v3.2.0:")
     print(f"  dataset           = {args.dataset}")
     print(f"  max_depth         = {args.max_depth}")
     print(f"  lambda_efficiency = {args.lambda_efficiency}")
@@ -1304,11 +1325,12 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
     print(f"  min_explore_prob  = {args.min_explore_prob} (v3.1.0 epsilon-greedy)")
     print(f"  best_val_ppl      = {best_val_ppl:.2f}")
     print()
-    print("TRUE BFS v3.1.0 FEATURES:")
+    print("TRUE BFS v3.2.0 FEATURES:")
     print("  ✓ Balanced binary trees (no uneven growth)")
     print("  ✓ O(log n) gradient paths (stable training)")
     print("  ✓ Predictable node counts (powers of 2 minus 1)")
     print("  ✓ Epsilon-greedy exploration ensures tree expansion during training")
+    print("  ✓ Fixed node count metrics (v3.2.0)")
     print()
     print("NEXT STEPS:")
     print()
@@ -1380,7 +1402,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
         "artifacts": {
             "checkpoint": args.save_path,
         },
-        "version": "3.1.0",
+        "version": "3.2.0",
     }
     
     try:
@@ -1397,7 +1419,7 @@ def train(args: argparse.Namespace, config_path: Optional[str] = None) -> str:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Train BoeNet v3.1.0 True BFS Language Model with REINFORCE",
+        description="Train BoeNet v3.2.0 True BFS Language Model with REINFORCE",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1426,7 +1448,7 @@ python3 train_boenet.py \\
 
 True BFS Architecture:
 ----------------------
-  v3.1.0 uses True BFS with per-LEVEL decisions:
+  v3.2.0 uses True BFS with per-LEVEL decisions:
   - Decisions made per level, not per node
   - Balanced binary tree guaranteed
   - O(log n) gradient paths
@@ -1438,6 +1460,9 @@ True BFS Architecture:
     depth=2: 7 nodes  (1 + 2 + 4)
     depth=3: 15 nodes (1 + 2 + 4 + 8)
     depth=4: 31 nodes (1 + 2 + 4 + 8 + 16)
+
+  v3.2.0 FIX: Node count metrics now correctly report tree size
+  (previously showed 0.0 due to incorrect calculation)
 
 Available Datasets:
 -------------------
