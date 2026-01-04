@@ -1,329 +1,216 @@
 # ============================================================================
-# BoeNet v3.2.0 Phase 3: COMPREHENSIVE SWEEP
+# BoeNet v4.0.0 - SCALED BPE MODEL CONFIGURATION
 # ============================================================================
 #
-# PURPOSE: Now that training takes MINUTES instead of HOURS, run a complete
-#          exploration of the entire parameter space to find optimal config.
+# PURPOSE: Train BoeNet with BPE tokenization (cl100k_base) for real
+#          language modeling quality. This addresses the core issue that
+#          character-level models are too small for meaningful generation.
 #
 # ============================================================================
-# THE BREAKTHROUGH: TRAINING IS NOW FAST
+# THE UPGRADE: CHARACTER-LEVEL → BPE TOKENIZATION
 # ============================================================================
 #
-# WHAT WE FIXED IN THIS SESSION:
-# ------------------------------
+# WHAT WE'RE FIXING:
+# ------------------
+# The v3.2.0 comprehensive sweep showed that:
+# 1. The model architecture works correctly
+# 2. The policy learns to not expand (correctly for the task)
+# 3. But the generated text is gibberish because:
+#    - Character-level tokenization (vocab=256)
+#    - Tiny model (~150K parameters)
+#    - Simple next-character prediction doesn't benefit from trees
 #
-# PROBLEM 1: GrowthPolicyNet was DEAD (v2.3.1 and earlier)
-#   - grow_prob = 0.0000 for ALL inputs
-#   - Trees NEVER expanded except forced by epsilon-greedy
-#   - Training took HOURS spinning uselessly
+# THE SOLUTION:
+# -------------
+# Scale up to a real language model:
 #
-# ROOT CAUSE:
-#   - model.py defined its own broken GrowthPolicyNet
-#   - LayerNorm + ReLU architecture killed all activations
-#   - Logits were -16 or lower → sigmoid(−16) ≈ 0.0000
-#
-# FIX APPLIED (v2.4.0):
-#   - DELETED broken GrowthPolicyNet from model.py
-#   - IMPORTED working GrowthPolicyNet from gating.py (v3.1.0)
-#   - Now grow_prob ≈ 0.5 (healthy, learnable)
-#
-# PROBLEM 2: Node count metrics showed 0.0 (v3.1.0)
-#   - avg_nodes_per_position = 0.0 in CSV
-#   - But logs showed trees WERE expanding (total_nodes=7)
-#
-# ROOT CAUSE:
-#   - Calculation divided by (positions * rollouts) instead of just rollouts
-#   - 15 / (8192 * 3) = 0.0006 ≈ 0.0
-#
-# FIX APPLIED (v3.2.0):
-#   - node_counts = tree structure sizes [1, 7, 3, ...]
-#   - avg_nodes = mean(node_counts) = correct value
-#
-# RESULT:
-#   | Metric              | Before (Broken) | After (Fixed)   |
-#   |---------------------|-----------------|-----------------|
-#   | Training time       | HOURS           | ~5 MINUTES      |
-#   | grow_prob           | 0.0000          | ~0.5            |
-#   | avg_nodes           | 0.0             | 1.27            |
-#   | avg_depth           | 0.0             | 0.12            |
-#   | Trees expanding     | ❌ Never        | ✅ Yes          |
-#   | Policy learning     | ❌ Frozen       | ✅ Active       |
+# | Parameter     | v3.2.0 (char) | v4.0.0 (BPE)    |
+# |---------------|---------------|-----------------|
+# | vocab_size    | 256           | 100,277         |
+# | embed_dim     | 64            | 256             |
+# | hidden_dim    | 128           | 512             |
+# | Parameters    | ~150K         | ~78M            |
+# | Tokenizer     | Character     | cl100k_base     |
 #
 # ============================================================================
-# WHY COMPREHENSIVE SWEEP NOW MAKES SENSE
+# TOKENIZER: cl100k_base (GPT-4 TOKENIZER)
 # ============================================================================
 #
-# OLD SITUATION (Broken):
-#   - Each run took hours
-#   - Limited to ~6 runs
-#   - Guessing at parameters
+# We use tiktoken's cl100k_base encoding:
+# - Used by GPT-4 and ChatGPT
+# - 100,277 vocabulary size
+# - ~30% better compression than GPT-2
+# - Modern BPE with byte fallback
 #
-# NEW SITUATION (Fixed):
-#   - Each run takes ~5 minutes
-#   - Can run 100+ configurations
-#   - Data-driven decisions
-#
-# SWEEP CALCULATION:
-#   - k values: 4 (0, 2, 3, 4)
-#   - depths: 5 (0, 2, 3, 4, 5)  
-#   - epochs: 6 (5, 10, 15, 20, 25, 30)
-#   
-#   But k=0 ignores depth, so:
-#   - k=0: 1 × 6 epochs = 6 runs
-#   - k=2,3,4: 3 × 5 depths × 6 epochs = 90 runs
-#   - Total: 96 runs × ~5 min = ~8 hours
-#
-# This gives us COMPLETE data to answer:
-#   1. Is tree structure worth it? (k=0 vs k>0)
-#   2. What branching factor is optimal? (k=2 vs k=3 vs k=4)
-#   3. Does deeper reasoning help? (depth=2 vs depth=5)
-#   4. When does each config converge? (epochs 5→30)
+# COMPARISON:
+# | Encoding      | Vocab Size | Tokens/Char | Notes                |
+# |---------------|------------|-------------|----------------------|
+# | char          | 256        | 1.0         | One token per char   |
+# | gpt2          | 50,257     | ~0.25       | GPT-2 tokenizer      |
+# | cl100k_base   | 100,277    | ~0.22       | GPT-4 tokenizer      |
 #
 # ============================================================================
-# FILE VERSIONS REQUIRED FOR THIS SWEEP
+# PARAMETER CALCULATION
 # ============================================================================
 #
-# CRITICAL: Ensure these versions are deployed before running!
+# v4.0.0 Model with BPE:
 #
-# | File                    | Version | Key Fix                           |
-# |-------------------------|---------|-----------------------------------|
-# | boenet/model.py         | v2.4.0  | Imports GrowthPolicyNet from gating |
-# | boenet/utils/gating.py  | v3.1.0  | Fixed GrowthPolicyNet architecture |
-# | train_boenet.py         | v3.2.0  | Fixed node count metric calculation |
+# | Component         | Calculation                | Params     |
+# |-------------------|----------------------------|------------|
+# | Embedding         | 100,277 × 256              | 25.7M      |
+# | Input projection  | 256 × 512 + 512            | 131K       |
+# | Node transform    | 512 × 512 + 512            | 262K       |
+# | Child proj (k=2)  | 512 × 1024 + 1024          | 525K       |
+# | Policy network    | 512 × 64 + 64 + 64 + 1     | ~33K       |
+# | Output head       | 512 × 100,277 + 100,277    | 51.4M      |
+# | TOTAL             |                            | ~78M       |
 #
-# VERIFICATION:
-#   - model.py should have: from boenet.utils.gating import GrowthPolicyNet
-#   - gating.py GrowthPolicyNet.forward() should return shape [N] not [N,1]
-#   - train_boenet.py should compute: avg = sum(tree_sizes) / len(tree_sizes)
-#
-# ============================================================================
-# TREE STRUCTURE VISUALIZATION
-# ============================================================================
-#
-# k=0 (Dense - No Tree):
-#   [Root] → Output
-#   Nodes: 1 (always)
-#
-# k=2 (Binary Tree):
-#
-#   DEPTH=0: [Root] → 1 node
-#   
-#   DEPTH=2: 
-#            Root
-#           /    \
-#          A      B
-#         / \    / \
-#        1   2  3   4
-#        → 7 nodes (1+2+4)
-#   
-#   DEPTH=3:
-#                 Root
-#               /      \
-#              A        B
-#             / \      / \
-#            1   2    3   4
-#           /\ /\    /\ /\
-#          8 leaf nodes
-#          → 15 nodes (1+2+4+8)
-#   
-#   DEPTH=4:
-#          → 31 nodes (1+2+4+8+16)
-#   
-#   DEPTH=5:
-#          → 63 nodes (1+2+4+8+16+32)
-#
-# k=3 (Ternary Tree):
-#   DEPTH=2: 1+3+9 = 13 nodes
-#   DEPTH=3: 1+3+9+27 = 40 nodes
-#   DEPTH=4: 1+3+9+27+81 = 121 nodes
-#
-# k=4 (Quaternary Tree):
-#   DEPTH=2: 1+4+16 = 21 nodes
-#   DEPTH=3: 1+4+16+64 = 85 nodes
-#   DEPTH=4: 1+4+16+64+256 = 341 nodes
-#
-# ============================================================================
-# REASONING INTERPRETATION BY DEPTH
-# ============================================================================
-#
-# Depth=0: "What's the answer?" (immediate response)
-# Depth=1: "What's likely? → Refine" (one reasoning step)
-# Depth=2: "Likely? → Yes/No → Confidence" (two steps)
-# Depth=3: "Likely? → Direction → Confidence → Evidence" (three steps)
-# Depth=4: "Likely? → Direction → Confidence → Evidence → Context" (four steps)
-# Depth=5: "Full reasoning chain with maximum context" (five steps)
-#
-# HYPOTHESIS: More depth = More reasoning = Better predictions
-#             But diminishing returns after some point
+# For comparison, v3.2.0 character-level was ~150K parameters.
+# This is a 520x scale-up!
 #
 # ============================================================================
 
+# ============================================================================
+# SWEEP CONFIGURATION
+# ============================================================================
 sweep:
   # ==========================================================================
-  # LANGUAGE MODEL PARAMETERS (FIXED - PROVEN VALUES)
+  # v4.0.0: TOKENIZER SETTINGS (NEW)
   # ==========================================================================
   
-  # Vocabulary size: FIXED at 256 (character-level ByteTokenizer)
-  vocab_size: 256
+  # Tokenizer type: "bpe" for BPE (cl100k_base), "char" for character-level
+  tokenizer_type: bpe
   
-  # Sequence length: FIXED at 128 (good balance of context and speed)
+  # BPE encoding: cl100k_base (GPT-4), gpt2, r50k_base, p50k_base
+  bpe_encoding: cl100k_base
+  
+  # Vocabulary size is determined by tokenizer:
+  # - char: 256
+  # - gpt2: 50,257
+  # - cl100k_base: 100,277
+  # Do NOT set vocab_size manually - it's auto-detected from tokenizer
+  
+  # ==========================================================================
+  # v4.0.0: SCALED MODEL DIMENSIONS
+  # ==========================================================================
+  
+  # Embedding dimension: Scaled up for BPE
+  # - char: 64
+  # - BPE: 256
+  embed_dim_list: [256]
+  
+  # Hidden dimension: Scaled up for BPE
+  # - char: 128
+  # - BPE: 512
+  hidden_dims: [512]
+  
+  # Sequence length: Can be shorter with BPE (fewer tokens per word)
   seq_len_list: [128]
-  
-  # Embedding dimension: FIXED at 64 (proven to work well)
-  embed_dim_list: [64]
   
   # Dataset: WikiText-2 (consistent with all previous runs)
   dataset: wikitext2
   
   # ==========================================================================
-  # K VALUES - COMPREHENSIVE (ALL BRANCHING FACTORS)
+  # K VALUES - FOCUSED SWEEP
   # ==========================================================================
   #
-  # k=0: Dense baseline (no tree structure)
-  #      - Always 1 node per position
-  #      - Fastest inference
-  #      - Target to beat: PPL ~11.55
+  # Based on v3.2.0 findings:
+  # - k=0 (dense) is the baseline
+  # - k=2 (binary) is most efficient
+  # - Higher k values showed diminishing returns
   #
-  # k=2: Binary tree (our current best)
-  #      - 2 children per node
-  #      - GPU-efficient (power of 2)
-  #      - Good sparsity behavior
-  #      - Current result: PPL ~11.68 with avg_nodes=1.27
-  #
-  # k=3: Ternary tree
-  #      - 3 children per node
-  #      - More branching options
-  #      - Historical: PPL ~11.63 at depth=2
-  #
-  # k=4: Quaternary tree
-  #      - 4 children per node
-  #      - Maximum branching tested
-  #      - Historical: PPL ~11.70, sparsity hurts quality
-  #
-  k_values: [0, 2, 3, 4]
+  # For the scaled model, we focus on k=0 and k=2:
+  k_values: [0, 2]
   
   # ==========================================================================
-  # DEPTH VALUES - COMPREHENSIVE (ALL REASONING LEVELS)
+  # DEPTH VALUES - FOCUSED SWEEP
   # ==========================================================================
   #
-  # NOTE: For k=0, depth is ignored (always 1 node)
-  #       For k>0, depth controls maximum tree expansion
+  # v3.2.0 showed that depth matters but has diminishing returns.
+  # For the scaled model, test depths 0, 2, 4:
   #
-  # | Depth | k=2 Nodes | k=3 Nodes | k=4 Nodes | Reasoning Levels |
-  # |-------|-----------|-----------|-----------|------------------|
-  # | 0     | 1         | 1         | 1         | 1 (root only)    |
-  # | 2     | 7         | 13        | 21        | 3 levels         |
-  # | 3     | 15        | 40        | 85        | 4 levels         |
-  # | 4     | 31        | 121       | 341       | 5 levels         |
-  # | 5     | 63        | 364       | 1365      | 6 levels         |
+  # | Depth | Nodes | Reasoning Levels |
+  # |-------|-------|------------------|
+  # | 0     | 1     | Root only        |
+  # | 2     | 7     | 3 levels         |
+  # | 4     | 31    | 5 levels         |
   #
-  # HYPOTHESIS: 
-  #   - Depth matters more than k for quality
-  #   - k=2 + high depth may beat k=4 + low depth
-  #   - Diminishing returns after depth=4 or 5
-  #
-  max_depths: [0, 2, 3, 4, 5]
+  max_depths: [0, 2, 4]
   
   # ==========================================================================
-  # EPOCHS - COMPREHENSIVE CONVERGENCE ANALYSIS
+  # EPOCHS - REDUCED FOR LARGER MODEL
   # ==========================================================================
   #
-  # Testing convergence at multiple checkpoints:
+  # The 78M parameter model will take longer per epoch.
+  # Start with fewer epochs to get initial results faster.
   #
-  # | Epochs | Purpose                                    |
-  # |--------|-------------------------------------------|
-  # | 5      | Quick baseline, early stopping point      |
-  # | 10     | Standard training checkpoint              |
-  # | 15     | Extended training                         |
-  # | 20     | Deep training                             |
-  # | 25     | Near-convergence check                    |
-  # | 30     | Full convergence (ensure plateau)         |
-  #
-  # QUESTIONS TO ANSWER:
-  #   - When does each (k, depth) combo converge?
-  #   - Do deeper trees need more epochs?
-  #   - Is there overfitting at high epochs?
-  #
-  epochs_list: [5, 10, 15, 20, 25, 30]
+  epochs_list: [5, 10, 20]
   
   # ==========================================================================
-  # POLICY PARAMETERS - FIXED (PROVEN VALUES FROM PHASE 1)
+  # POLICY PARAMETERS - PROVEN VALUES
   # ==========================================================================
   
   # Lambda efficiency: 0.05 (best from Phase 1)
-  # Controls sparsity vs quality tradeoff
-  # Higher = more pressure to use fewer nodes
   lambda_efficiency_list: [0.05]
   
-  # Greedy threshold: 0.50 (enables adaptive sparsity)
-  # During inference, expand only if grow_prob >= 0.50
-  # This is where adaptive computation happens
+  # Greedy threshold: 0.50
   greedy_threshold_list: [0.50]
   
-  # Number of rollouts: 3 (good exploration vs speed tradeoff)
-  # More rollouts = better gradient estimates but slower training
+  # Number of rollouts: 3
   num_rollouts_list: [3]
   
-  # Entropy bonus: 0.01 (encourages exploration)
-  # Prevents policy from collapsing to always-expand or always-stop
+  # Entropy bonus: 0.01
   beta_entropy_list: [0.01]
   
-  # Policy loss weight: 0.5 (balanced with LM loss)
-  # How much the policy gradient affects total loss
+  # Policy loss weight: 0.5
   beta_policy_list: [0.5]
   
-  # ==========================================================================
-  # v3.1.0: EPSILON-GREEDY EXPLORATION
-  # ==========================================================================
-  #
-  # min_explore_prob: 0.10 (10% forced expansion)
-  # During training, 10% of decisions force tree expansion
-  # This ensures trees actually expand during training
-  # Without this, policy can get stuck at depth=0
-  #
+  # Epsilon-greedy exploration: 10%
   min_explore_prob: 0.10
   
   # ==========================================================================
-  # ARCHITECTURE PARAMETERS - FIXED
+  # ARCHITECTURE PARAMETERS
   # ==========================================================================
   
-  # Hidden dimensions: 128 (good capacity for this task)
-  hidden_dims: [128]
-  
-  # Pooling mode: mean (average all node representations)
-  # Alternatives: sum, learned
+  # Pooling mode: mean
   poolings: [mean]
   
   # ==========================================================================
-  # OPTIMIZATION - FIXED (PROVEN VALUES)
+  # v4.0.0: OPTIMIZATION - ADJUSTED FOR LARGER MODEL
   # ==========================================================================
   
-  # Learning rate: 0.001 (standard for AdamW)
-  lrs: [0.001]
+  # Learning rate: Lower for larger model
+  # - char: 0.001
+  # - BPE: 0.0001
+  lrs: [0.0001]
   
-  # Batch size: 64 (good GPU utilization)
-  batch_sizes: [64]
+  # Batch size: Smaller for larger model (memory constraints)
+  # - char: 64
+  # - BPE: 32 or 16
+  batch_sizes: [32]
   
-  # Weight decay: 0.0 (no regularization needed for this scale)
-  weight_decays: [0.0]
+  # Weight decay: Add regularization for larger model
+  # - char: 0.0
+  # - BPE: 0.01
+  weight_decays: [0.01]
   
-  # Gradient clipping: 1.0 (standard)
+  # Gradient clipping: Keep same
   grad_clip: 1.0
   
-  # Policy gradient clipping: 0.5 (more aggressive for stability)
+  # Policy gradient clipping: Keep same
   policy_grad_clip: 0.5
 
 # ============================================================================
 # TRAINING SETTINGS
 # ============================================================================
 training:
-  # Default epochs (overridden by epochs_list)
-  epochs: 20
+  # Default epochs
+  epochs: 10
   
-  # Single run per config (no repeats needed with fixed seed)
+  # Single run per config
   repeats: 1
   
-  # Random seed (consistent across all runs)
+  # Random seed
   seed0: 42
   
   # Dataset
@@ -342,23 +229,23 @@ inference:
   # Number of samples for perplexity measurement
   infer_samples: 1000
   
-  # Force CPU inference for fair latency comparison
-  cpu_only: true
+  # Force CPU inference for fair comparison
+  cpu_only: false
   
-  # Enable policy analysis (shows grow_prob distribution)
+  # Enable policy analysis
   debug_policy: true
 
 # ============================================================================
 # PATHS
 # ============================================================================
 paths:
-  # Output directory for all runs
+  # Output directory
   save_root: runs
   
   # Dataset directory
   data_root: ./data
   
-  # Training script (v3.2.0 with fixed node counting)
+  # Training script (v4.0.0)
   train_script: train_boenet.py
   
   # Inference script
@@ -368,100 +255,41 @@ paths:
 # RUN COUNT CALCULATION
 # ============================================================================
 #
-# COMPREHENSIVE SWEEP:
+# FOCUSED SWEEP:
 #
 # k=0 (depth ignored):
-#   1 config × 6 epochs = 6 runs
+#   1 config × 3 epochs = 3 runs
 #
 # k=2:
-#   5 depths × 6 epochs = 30 runs
+#   3 depths × 3 epochs = 9 runs
 #
-# k=3:
-#   5 depths × 6 epochs = 30 runs
-#
-# k=4:
-#   5 depths × 6 epochs = 30 runs
-#
-# TOTAL: 6 + 30 + 30 + 30 = 96 runs
+# TOTAL: 3 + 9 = 12 runs
 #
 # TIME ESTIMATE:
-#   - Average ~5 minutes per run (based on v3.2.0 performance)
-#   - 96 runs × 5 min = 480 min = ~8 hours
-#
-# COMPARISON TO OLD BROKEN SYSTEM:
-#   - Old: Hours per run, limited exploration
-#   - New: 8 hours for COMPLETE parameter space
+#   - ~78M parameters, expect ~15-30 min per epoch
+#   - Average ~10 min per run with early epochs
+#   - 12 runs × 10 min = ~2 hours for initial sweep
 #
 # ============================================================================
 
 # ============================================================================
-# EXPECTED RESULTS AND HYPOTHESES
+# EXPECTED IMPROVEMENTS WITH BPE
 # ============================================================================
 #
-# BASELINE (k=0 dense):
-#   - PPL: ~11.55 (target to match/beat)
-#   - Latency: ~0.24 ms
-#   - Always 1 node
+# 1. TEXT QUALITY:
+#    - Coherent words and sentences (not gibberish)
+#    - Proper punctuation and spacing
+#    - Reasonable grammar
 #
-# HYPOTHESIS 1: k=2 is optimal branching factor
-#   - Binary trees are simplest
-#   - GPU-efficient (power of 2)
-#   - Good sparsity behavior
-#   - Expected: k=2 ≤ k=3 < k=4 at same depth
+# 2. PERPLEXITY:
+#    - Random baseline: 100,277 (vocab size)
+#    - Expected after training: 100-500 (language model range)
+#    - Much more meaningful than char-level PPL
 #
-# HYPOTHESIS 2: Depth matters more than k
-#   - k=2 depth=4 should beat k=4 depth=2
-#   - More reasoning levels > more branches per level
-#   - Expected: depth=4 or 5 approaches k=0 quality
-#
-# HYPOTHESIS 3: Adaptive sparsity provides efficiency
-#   - avg_nodes << max_nodes (currently 1.27 vs 31)
-#   - Model uses minimal compute for easy tokens
-#   - Model expands deeper for hard tokens
-#
-# HYPOTHESIS 4: Diminishing returns at high depth
-#   - depth=5 may not beat depth=4 significantly
-#   - Extra compute not worth marginal quality gain
-#   - Sweet spot likely depth=3 or 4
-#
-# ============================================================================
-
-# ============================================================================
-# KEY COMPARISONS TO ANALYZE
-# ============================================================================
-#
-# After sweep completes, analyze:
-#
-# 1. DENSE VS SPARSE:
-#    | Config          | PPL    | Latency | Verdict     |
-#    |-----------------|--------|---------|-------------|
-#    | k=0             | 11.55  | 0.24ms  | baseline    |
-#    | k=2 depth=4     | ???    | ???     | tree worth it? |
-#
-# 2. BRANCHING FACTOR (at depth=4):
-#    | k | Max Nodes | PPL | avg_nodes | Efficiency |
-#    |---|-----------|-----|-----------|------------|
-#    | 2 | 31        | ??? | ???       | ???        |
-#    | 3 | 121       | ??? | ???       | ???        |
-#    | 4 | 341       | ??? | ???       | ???        |
-#
-# 3. DEPTH IMPACT (for k=2):
-#    | Depth | Max Nodes | PPL    | Improvement |
-#    |-------|-----------|--------|-------------|
-#    | 2     | 7         | 11.68  | baseline    |
-#    | 3     | 15        | ???    | vs depth=2  |
-#    | 4     | 31        | ???    | vs depth=2  |
-#    | 5     | 63        | ???    | vs depth=4  |
-#
-# 4. CONVERGENCE SPEED:
-#    - Which configs converge fastest?
-#    - Do deeper trees need more epochs?
-#    - Is 30 epochs enough for all?
-#
-# 5. SPARSITY VS QUALITY:
-#    - Plot: avg_nodes vs PPL
-#    - Find Pareto frontier
-#    - Identify optimal efficiency point
+# 3. TREE UTILIZATION:
+#    - More complex token relationships
+#    - Policy may actually learn when to expand
+#    - Tree structure might provide real benefit
 #
 # ============================================================================
 
@@ -470,16 +298,18 @@ paths:
 # ============================================================================
 #
 # PREREQUISITES:
-#   1. Ensure v3.2.0 files are deployed:
-#      - boenet/model.py (v2.4.0)
-#      - boenet/utils/gating.py (v3.1.0)
-#      - train_boenet.py (v3.2.0)
+#   1. Ensure v4.0.0 files are deployed:
+#      - boenet/tokenizer.py (v1.1.0 with cl100k_base)
+#      - train_boenet.py (v4.0.0 with BPE support)
 #
-#   2. Clear Python bytecode cache:
+#   2. Install tiktoken:
+#      pip install tiktoken
+#
+#   3. Clear Python bytecode cache:
 #      find . -type d -name __pycache__ -exec rm -rf {} +
 #
 # START SWEEP:
-#   docker run -d --gpus all --name boenet_comprehensive \
+#   docker run -d --gpus all --name boenet_bpe \
 #     -v ${PWD}/data:/app/data \
 #     -v ${PWD}/runs:/app/runs \
 #     -v ${PWD}/configs:/app/configs \
@@ -487,78 +317,49 @@ paths:
 #     boenet:cuda python boenet_training_matrix.py \
 #       --config configs/experiment-config.yaml
 #
-# MONITOR PROGRESS:
-#   # Watch logs
-#   docker logs -f boenet_comprehensive
-#   
-#   # Check GPU utilization
-#   nvidia-smi -l 5
-#   
-#   # View results as they complete
-#   docker exec boenet_comprehensive cat runs/*/matrix_results.csv
-#
-# STOP IF NEEDED:
-#   docker stop boenet_comprehensive
-#   docker rm boenet_comprehensive
-#
-# ============================================================================
-
-# ============================================================================
-# AFTER SWEEP: ANALYSIS AND NEXT STEPS
-# ============================================================================
-#
-# STEP 1: Collect Results
-#   - Combine all matrix_results.csv files
-#   - Sort by val_ppl to find best configs
-#   - Identify Pareto frontier (quality vs efficiency)
-#
-# STEP 2: Statistical Analysis
-#   - Compare k=0 vs best tree model
-#   - Test significance of depth improvements
-#   - Analyze sparsity patterns
-#
-# STEP 3: User Interaction Testing
-#   # Find best model path from CSV
+# SINGLE RUN (QUICK TEST):
 #   docker run -it --gpus all \
+#     -v ${PWD}/data:/app/data \
 #     -v ${PWD}/runs:/app/runs \
-#     boenet:cuda python infer_boenet.py \
-#       --ckpt runs/TIMESTAMP/BEST_RUN/model.pt \
-#       --generate \
-#       --max_tokens 200 \
-#       --temperature 0.8
+#     -v ${PWD}/boenet:/app/boenet \
+#     boenet:cuda python train_boenet.py \
+#       --tokenizer_type bpe \
+#       --embed_dim 256 \
+#       --hidden_dim 512 \
+#       --max_depth 2 \
+#       --epochs 5
 #
-# STEP 4: If Results Are Promising
-#   - Develop DYNAMIC DEPTH algorithm
-#   - Model decides when to stop expanding
-#   - True adaptive computation per input
+# MONITOR:
+#   docker logs -f boenet_bpe
+#   nvidia-smi -l 5
 #
 # ============================================================================
 
 # ============================================================================
-# FUTURE: DYNAMIC DEPTH ALGORITHM
+# COMPARISON: CHAR vs BPE
 # ============================================================================
 #
-# CURRENT (Fixed Depth):
-#   max_depth = 4  # Hardcoded
-#   # Every input gets same max depth
+# For scientific comparison, you can run both:
 #
-# FUTURE (Dynamic Depth):
-#   while policy_says_expand() and depth < max_depth:
-#       expand_next_level()
-#       depth += 1
-#   # Different inputs get different depths!
+# CHARACTER-LEVEL (v3.2.0 baseline):
+#   python train_boenet.py \
+#       --tokenizer_type char \
+#       --embed_dim 64 \
+#       --hidden_dim 128 \
+#       --epochs 30
 #
-# BENEFITS:
-#   - Easy tokens: depth=1-2 (fast, like System 1)
-#   - Hard tokens: depth=4-5 (accurate, like System 2)
-#   - True adaptive computation
-#   - Optimal efficiency per input
+# BPE (v4.0.0 scaled):
+#   python train_boenet.py \
+#       --tokenizer_type bpe \
+#       --embed_dim 256 \
+#       --hidden_dim 512 \
+#       --epochs 20
 #
-# This sweep provides the data foundation for:
-#   1. Understanding depth-quality relationship
-#   2. Setting appropriate max_depth limits
-#   3. Training the stopping policy
-#   4. Evaluating dynamic vs fixed depth
+# EXPECTED RESULTS:
+# | Model      | Params | PPL Baseline | Expected PPL | Generation Quality |
+# |------------|--------|--------------|--------------|-------------------|
+# | Char v3.2.0| 150K   | 256          | ~11.5        | Gibberish         |
+# | BPE v4.0.0 | 78M    | 100,277      | ~100-500     | Coherent text     |
 #
 # ============================================================================
 
@@ -566,24 +367,22 @@ paths:
 # VERSION HISTORY
 # ============================================================================
 #
+# v4.0.0 (2026-01-03) - BPE TOKENIZATION
+#   - Added cl100k_base tokenizer (GPT-4 tokenizer)
+#   - Scaled model: embed_dim=256, hidden_dim=512
+#   - Parameters: ~78M (vs ~150K for char)
+#   - Lower learning rate: 0.0001 (vs 0.001)
+#   - Added weight decay: 0.01
+#   - Smaller batch size: 32 (vs 64)
+#
 # v3.2.0 (2026-01-03) - COMPREHENSIVE SWEEP
-#   - Enabled by training speedup (hours → minutes)
-#   - Full parameter space exploration
-#   - k ∈ {0, 2, 3, 4}
-#   - depth ∈ {0, 2, 3, 4, 5}
-#   - epochs ∈ {5, 10, 15, 20, 25, 30}
-#   - 96 total runs, ~8 hours estimated
+#   - Fixed node count metrics
+#   - 96 runs across full parameter space
+#   - Character-level only
 #
-# v3.1.0 (2026-01-01) - Limited sweep (broken training)
-#   - k ∈ {0, 2}
-#   - depth ∈ {2, 3, 4}
-#   - epochs ∈ {10, 20, 30}
-#   - Training was slow due to GrowthPolicyNet bug
-#
-# v2.0.1 - Phase 1/2 sweeps
-#   - Initial parameter exploration
-#   - Discovered k=2 as best branching factor
-#   - Limited by slow training
+# v3.1.0 (2026-01-01) - EPSILON-GREEDY
+#   - Added min_explore_prob
+#   - Fixed tree expansion during training
 #
 # ============================================================================
 
@@ -591,19 +390,18 @@ paths:
 # SUMMARY
 # ============================================================================
 #
-# This config runs 96 experiments to comprehensively map the BoeNet
-# parameter space. Now that training is fast (~5 min/run), we can
-# finally answer the key questions:
+# This config upgrades BoeNet from a toy character-level model to a real
+# language model with BPE tokenization. Key changes:
 #
-#   1. Is the tree structure worth the complexity?
-#   2. What is the optimal (k, depth) combination?
-#   3. How does adaptive sparsity affect quality?
-#   4. When do models converge?
+# 1. TOKENIZER: cl100k_base (GPT-4's tokenizer) instead of character-level
+# 2. SCALE: 78M parameters instead of 150K (520x larger)
+# 3. DIMENSIONS: embed_dim=256, hidden_dim=512
+# 4. OPTIMIZATION: Lower LR, weight decay, smaller batches
 #
-# Results will guide:
-#   - Production model selection
-#   - Dynamic depth algorithm design
-#   - Future architecture improvements
+# With these changes, the model should:
+# - Generate coherent text (not gibberish)
+# - Have meaningful perplexity values
+# - Potentially benefit from tree structure for complex reasoning
 #
 # LET'S GO! 🚀
 #

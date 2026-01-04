@@ -1,7 +1,16 @@
 # ============================================================================
-# BoeNet CUDA Dockerfile (v1.0.3 - Language Model)
+# BoeNet CUDA Dockerfile (v1.1.0 - BPE Tokenizer Support)
 # ============================================================================
 # GPU-enabled container for accelerated training and inference.
+#
+# v1.1.0 Changes (2026-01-03):
+# ----------------------------
+#   - ADDED: tiktoken for BPE tokenization (cl100k_base, GPT-4 tokenizer)
+#   - ADDED: tiktoken verification step during build
+#   - UPDATED: Environment variables for BPE tokenization defaults
+#   - UPDATED: Labels for v4.0.0 training script compatibility
+#   - This enables word/subword-level tokenization instead of character-level
+#   - Required for train_boenet.py v4.0.0 with --tokenizer_type bpe
 #
 # Converted from BFSNet (Vision) to BoeNet (Language)
 # ---------------------------------------------------
@@ -12,6 +21,7 @@
 #   - RENAMED: bfs_training_matrix.py → boenet_training_matrix.py
 #   - RENAMED: Environment variables BFSNET_* → BOENET_*
 #   - ADDED: datasets library for HuggingFace Shakespeare/TinyStories
+#   - ADDED: tiktoken for BPE tokenization (v1.1.0)
 #   - UPDATED: Labels and descriptions for language model
 #   - UNCHANGED: All CUDA/PyTorch configuration
 #
@@ -22,6 +32,15 @@
 #   docker run --rm --gpus all \
 #       -v $(pwd)/data:/app/data -v $(pwd)/runs:/app/runs \
 #       boenet:cuda python train_boenet.py --epochs 10 --dataset wikitext2
+#
+# Run with BPE Tokenization (v1.1.0 / v4.0.0):
+#   docker run --rm --gpus all \
+#       -v $(pwd)/data:/app/data -v $(pwd)/runs:/app/runs \
+#       boenet:cuda python train_boenet.py \
+#           --tokenizer_type bpe \
+#           --embed_dim 256 \
+#           --hidden_dim 512 \
+#           --epochs 10
 #
 # Run in Background (detached mode - survives terminal close/sleep):
 #   docker run -d --gpus all \
@@ -91,6 +110,7 @@
 #   - PyTorch 2.7.1 (cu128) - Deep learning framework with Blackwell support
 #   - torchvision - Vision utilities (for potential multi-modal extensions)
 #   - datasets - HuggingFace datasets for WikiText-2/Shakespeare/TinyStories (REQUIRED)
+#   - tiktoken - OpenAI's BPE tokenizer for cl100k_base encoding (REQUIRED for v4.0.0)
 #   - tqdm - Progress bars for training matrix
 #   - pyyaml - YAML config file support
 #   - pandas - Data analysis for results
@@ -99,11 +119,23 @@
 #
 # Language Model Specific:
 #   - Supports WikiText-2, WikiText-103, Shakespeare, TinyStories, and custom text files
-#   - Character-level tokenization (vocab_size=256)
+#   - Character-level tokenization (vocab_size=256) - legacy
+#   - BPE tokenization with tiktoken (vocab_size=100,277) - NEW v1.1.0/v4.0.0
 #   - Configurable sequence length (seq_len) and embedding dimension (embed_dim)
 #   - Text generation with temperature, top-k, and top-p sampling
 #
+# Tokenizer Options (v1.1.0):
+#   - Character-level (--tokenizer_type char): vocab_size=256, embed_dim=64, hidden_dim=128
+#   - BPE (--tokenizer_type bpe): vocab_size=100,277, embed_dim=256, hidden_dim=512
+#   - BPE produces ~78M parameter model vs ~150K for character-level (520x larger)
+#
 # Changelog:
+#   2026-01-03 - v1.1.0 BPE TOKENIZER SUPPORT:
+#                - Added tiktoken package for BPE tokenization
+#                - Added tiktoken verification step during build
+#                - Updated environment variables for BPE defaults
+#                - Required for train_boenet.py v4.0.0 / tokenizer.py v1.1.0
+#                - Supports cl100k_base (GPT-4), gpt2, and other encodings
 #   2025-12-29 - v1.0.3 BUGFIX:
 #                - Fixed HuggingFace cache permission error for Docker volume mounts
 #                - Changed HF_DATASETS_CACHE and HF_HOME to /app/data/.cache
@@ -235,6 +267,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install additional packages with updated versions
 # CRITICAL: tqdm is REQUIRED for progress bars in boenet_training_matrix.py
 # CRITICAL: datasets is REQUIRED for HuggingFace WikiText-2/Shakespeare/TinyStories
+# CRITICAL: tiktoken is REQUIRED for BPE tokenization in train_boenet.py v4.0.0
 RUN pip install --no-cache-dir \
     pyyaml>=6.0.0 \
     tqdm>=4.66.0 \
@@ -244,13 +277,18 @@ RUN pip install --no-cache-dir \
     networkx>=3.0 \
     scipy>=1.11.0 \
     scikit-learn>=1.3.0 \
-    datasets>=2.14.0
+    datasets>=2.14.0 \
+    tiktoken>=0.5.0
 
 # Verify tqdm installation (required for progress bars in boenet_training_matrix.py)
 RUN python -c "import tqdm; print(f'tqdm installed successfully, version: {tqdm.__version__}')"
 
 # Verify datasets installation (required for WikiText-2/Shakespeare/TinyStories)
 RUN python -c "import datasets; print(f'datasets installed successfully, version: {datasets.__version__}')"
+
+# Verify tiktoken installation (required for BPE tokenization in v4.0.0)
+# Also verify that cl100k_base encoding is available
+RUN python -c "import tiktoken; enc = tiktoken.get_encoding('cl100k_base'); print(f'tiktoken installed successfully, version: {tiktoken.__version__}'); print(f'cl100k_base vocab size: {enc.n_vocab}')"
 
 # Optional: Install NVIDIA tools for monitoring
 RUN pip install --no-cache-dir \
@@ -320,16 +358,19 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # BoeNet settings (language model)
-# Updated default dataset from shakespeare to wikitext2 (v2.0.0)
+# Updated for v4.0.0 BPE tokenization defaults
 ENV BOENET_DEVICE=auto \
     BOENET_DATA_ROOT=/app/data \
     BOENET_RUNS_ROOT=/app/runs \
     BOENET_CONFIG=/app/configs/experiment-config.yaml \
     BOENET_LOG_LEVEL=INFO \
     BOENET_DATASET=wikitext2 \
-    BOENET_VOCAB_SIZE=256 \
+    BOENET_TOKENIZER_TYPE=bpe \
+    BOENET_BPE_ENCODING=cl100k_base \
+    BOENET_VOCAB_SIZE=100277 \
     BOENET_SEQ_LEN=128 \
-    BOENET_EMBED_DIM=64
+    BOENET_EMBED_DIM=256 \
+    BOENET_HIDDEN_DIM=512
 
 # ----------------------------------------------------------------------------
 # HuggingFace Cache Configuration (CRITICAL FIX v1.0.3)
@@ -361,6 +402,13 @@ ENV BOENET_DEVICE=auto \
 ENV HF_DATASETS_CACHE=/app/data/.cache \
     HF_HOME=/app/data/.cache
 
+# ----------------------------------------------------------------------------
+# tiktoken Cache Configuration (v1.1.0)
+# ----------------------------------------------------------------------------
+# tiktoken downloads encoding files on first use.
+# Set TIKTOKEN_CACHE_DIR to persist these across container runs.
+ENV TIKTOKEN_CACHE_DIR=/app/data/.cache/tiktoken
+
 # PyTorch CUDA settings
 # CRITICAL: Blackwell (RTX 50 series) uses sm_120, NOT sm_100
 # This was a common misconception - the correct compute capability is 12.0
@@ -385,7 +433,7 @@ ENV OMP_NUM_THREADS=4 \
 # Health Check
 # ----------------------------------------------------------------------------
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; from boenet.model import BoeNet; import datasets; print('OK')" || exit 1
+    CMD python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; from boenet.model import BoeNet; import datasets; import tiktoken; print('OK')" || exit 1
 
 # ----------------------------------------------------------------------------
 # Default Command
@@ -396,11 +444,15 @@ CMD ["python", "train_boenet.py", "--help"]
 # Labels
 # ----------------------------------------------------------------------------
 LABEL maintainer="BoeNet Project" \
-    version="1.0.3" \
-    description="BoeNet CUDA Training and Inference Container for Language Models with Blackwell Support" \
+    version="1.1.0" \
+    description="BoeNet CUDA Training and Inference Container for Language Models with BPE Tokenization and Blackwell Support" \
     model.type="language" \
     model.architecture="BFS+REINFORCE" \
     model.task="next-token-prediction" \
+    tokenizer.default="bpe" \
+    tokenizer.bpe.encoding="cl100k_base" \
+    tokenizer.bpe.vocab_size="100277" \
+    tokenizer.char.vocab_size="256" \
     cuda.version="12.8" \
     cudnn.version="bundled" \
     pytorch.version="2.7.1" \
@@ -409,35 +461,48 @@ LABEL maintainer="BoeNet Project" \
     supported.architectures="Pascal, Volta, Turing, Ampere, Ada Lovelace, Hopper, Blackwell" \
     supported.datasets="wikitext2, wikitext103, shakespeare, tinystories, bookcorpus, openwebtext, textfile" \
     default.dataset="wikitext2" \
-    features="tqdm progress bars, YAML config, text generation, perplexity metrics, policy analysis, HuggingFace datasets" \
+    features="BPE tokenization, tqdm progress bars, YAML config, text generation, perplexity metrics, policy analysis, HuggingFace datasets" \
     scripts.train="train_boenet.py" \
     scripts.infer="infer_boenet.py" \
     scripts.matrix="boenet_training_matrix.py" \
     scripts.test="test_true_sparsity_boenet.py" \
     org.opencontainers.image.source="https://github.com/boenet/boenet" \
     org.opencontainers.image.title="BoeNet CUDA" \
-    org.opencontainers.image.description="GPU-accelerated container for BoeNet language model training and inference with RTX 50 series (Blackwell sm_120) support"
+    org.opencontainers.image.description="GPU-accelerated container for BoeNet language model training and inference with BPE tokenization (cl100k_base) and RTX 50 series (Blackwell sm_120) support"
 
 # ============================================================================
 # Usage Examples
 # ============================================================================
 #
-# 1. TRAINING ON WIKITEXT-2 (Quick Start - DEFAULT):
+# 1. TRAINING WITH BPE TOKENIZATION (v4.0.0 - RECOMMENDED):
 #    docker run --rm --gpus all \
 #        -v $(pwd)/data:/app/data \
 #        -v $(pwd)/runs:/app/runs \
 #        boenet:cuda python train_boenet.py \
+#            --tokenizer_type bpe \
+#            --bpe_encoding cl100k_base \
+#            --embed_dim 256 \
+#            --hidden_dim 512 \
+#            --max_depth 4 \
+#            --epochs 10
+#
+# 2. TRAINING ON WIKITEXT-2 (Character-level - Legacy):
+#    docker run --rm --gpus all \
+#        -v $(pwd)/data:/app/data \
+#        -v $(pwd)/runs:/app/runs \
+#        boenet:cuda python train_boenet.py \
+#            --tokenizer_type char \
+#            --embed_dim 64 \
+#            --hidden_dim 128 \
 #            --dataset wikitext2 \
 #            --epochs 10 \
 #            --seq_len 128 \
-#            --embed_dim 64 \
-#            --hidden_dim 128 \
 #            --max_depth 2 \
 #            --max_children 3 \
 #            --lambda_efficiency 0.05 \
 #            --greedy_threshold 0.42
 #
-# 2. TRAINING ON SHAKESPEARE:
+# 3. TRAINING ON SHAKESPEARE:
 #    docker run --rm --gpus all \
 #        -v $(pwd)/data:/app/data \
 #        -v $(pwd)/runs:/app/runs \
@@ -446,19 +511,20 @@ LABEL maintainer="BoeNet Project" \
 #            --epochs 10 \
 #            --seq_len 128
 #
-# 3. TRAINING ON TINYSTORIES (Larger Dataset):
+# 4. TRAINING ON TINYSTORIES (Larger Dataset):
 #    docker run --rm --gpus all \
 #        -v $(pwd)/data:/app/data \
 #        -v $(pwd)/runs:/app/runs \
 #        boenet:cuda python train_boenet.py \
 #            --dataset tinystories \
+#            --tokenizer_type bpe \
 #            --epochs 20 \
 #            --seq_len 256 \
-#            --embed_dim 128 \
-#            --hidden_dim 256 \
-#            --batch_size 32
+#            --embed_dim 256 \
+#            --hidden_dim 512 \
+#            --batch_size 16
 #
-# 4. TEXT GENERATION:
+# 5. TEXT GENERATION:
 #    docker run --rm -it --gpus all \
 #        -v $(pwd)/runs:/app/runs \
 #        boenet:cuda python infer_boenet.py \
@@ -469,7 +535,7 @@ LABEL maintainer="BoeNet Project" \
 #            --temperature 0.8 \
 #            --top_k 40
 #
-# 5. POLICY ANALYSIS (Debug):
+# 6. POLICY ANALYSIS (Debug):
 #    docker run --rm --gpus all \
 #        -v $(pwd)/runs:/app/runs \
 #        boenet:cuda python infer_boenet.py \
@@ -477,19 +543,20 @@ LABEL maintainer="BoeNet Project" \
 #            --debug_policy \
 #            --samples 1000
 #
-# 6. FULL SWEEP (Background):
+# 7. FULL SWEEP WITH BPE (Background):
 #    docker run -d --gpus all \
-#        --name boenet_sweep \
+#        --name boenet_bpe_sweep \
 #        -v $(pwd)/data:/app/data \
 #        -v $(pwd)/runs:/app/runs \
 #        -v $(pwd)/configs:/app/configs \
+#        -v $(pwd)/boenet:/app/boenet \
 #        boenet:cuda python boenet_training_matrix.py \
 #            --config configs/experiment-config.yaml
 #
 #    # Monitor:
-#    docker logs -f boenet_sweep
+#    docker logs -f boenet_bpe_sweep
 #
-# 7. QUICK TEST (CI/CD):
+# 8. QUICK TEST (CI/CD):
 #    docker run --rm --gpus all \
 #        -v $(pwd)/data:/app/data \
 #        -v $(pwd)/runs:/app/runs \
@@ -497,16 +564,16 @@ LABEL maintainer="BoeNet Project" \
 #        boenet:cuda python boenet_training_matrix.py \
 #            --config configs/test-config.yaml
 #
-# 8. SPARSITY TESTS:
+# 9. SPARSITY TESTS:
 #    docker run --rm --gpus all \
 #        boenet:cuda python test_true_sparsity_boenet.py
 #
-# 9. INTERACTIVE SHELL:
-#    docker run --rm -it --gpus all \
-#        -v $(pwd):/app \
-#        boenet:cuda bash
+# 10. INTERACTIVE SHELL:
+#     docker run --rm -it --gpus all \
+#         -v $(pwd):/app \
+#         boenet:cuda bash
 #
-# 10. WINDOWS POWERSHELL (use ${PWD} instead of $(pwd)):
+# 11. WINDOWS POWERSHELL (use ${PWD} instead of $(pwd)):
 #     docker run --rm `
 #         -v ${PWD}/data:/app/data `
 #         -v ${PWD}/runs:/app/runs `
@@ -520,22 +587,27 @@ LABEL maintainer="BoeNet Project" \
 # Environment Variables Reference
 # ============================================================================
 #
-# BOENET_DEVICE:      Device selection (auto, cuda, cpu)
-# BOENET_DATA_ROOT:   Data directory path
-# BOENET_RUNS_ROOT:   Output/runs directory path
-# BOENET_CONFIG:      Default config file path
-# BOENET_LOG_LEVEL:   Logging level (DEBUG, INFO, WARNING, ERROR)
-# BOENET_DATASET:     Default dataset (wikitext2, shakespeare, tinystories)
-# BOENET_VOCAB_SIZE:  Vocabulary size (256 for char-level)
-# BOENET_SEQ_LEN:     Default sequence length
-# BOENET_EMBED_DIM:   Default embedding dimension
-# HF_DATASETS_CACHE:  HuggingFace datasets cache directory (/app/data/.cache)
-# HF_HOME:            HuggingFace home directory (/app/data/.cache)
+# BOENET_DEVICE:         Device selection (auto, cuda, cpu)
+# BOENET_DATA_ROOT:      Data directory path
+# BOENET_RUNS_ROOT:      Output/runs directory path
+# BOENET_CONFIG:         Default config file path
+# BOENET_LOG_LEVEL:      Logging level (DEBUG, INFO, WARNING, ERROR)
+# BOENET_DATASET:        Default dataset (wikitext2, shakespeare, tinystories)
+# BOENET_TOKENIZER_TYPE: Tokenizer type (bpe, char) - NEW v1.1.0
+# BOENET_BPE_ENCODING:   BPE encoding (cl100k_base, gpt2) - NEW v1.1.0
+# BOENET_VOCAB_SIZE:     Vocabulary size (100277 for BPE, 256 for char)
+# BOENET_SEQ_LEN:        Default sequence length
+# BOENET_EMBED_DIM:      Default embedding dimension (256 for BPE, 64 for char)
+# BOENET_HIDDEN_DIM:     Default hidden dimension (512 for BPE, 128 for char)
+# HF_DATASETS_CACHE:     HuggingFace datasets cache directory (/app/data/.cache)
+# HF_HOME:               HuggingFace home directory (/app/data/.cache)
+# TIKTOKEN_CACHE_DIR:    tiktoken encoding cache directory (/app/data/.cache/tiktoken)
 #
 # Override any of these at runtime:
 #   docker run --rm --gpus all \
 #       -e BOENET_DATASET=tinystories \
-#       -e BOENET_SEQ_LEN=256 \
+#       -e BOENET_TOKENIZER_TYPE=bpe \
+#       -e BOENET_EMBED_DIM=256 \
 #       boenet:cuda python train_boenet.py
 #
 # ============================================================================
@@ -544,7 +616,7 @@ LABEL maintainer="BoeNet Project" \
 # Volume Mounts Reference
 # ============================================================================
 #
-# /app/data:        Dataset storage AND HuggingFace cache (/app/data/.cache)
+# /app/data:        Dataset storage AND HuggingFace/tiktoken cache (/app/data/.cache)
 # /app/runs:        Training outputs (checkpoints, logs, CSVs)
 # /app/configs:     YAML configuration files
 # /app/figures:     Generated plots and visualizations
@@ -556,6 +628,7 @@ LABEL maintainer="BoeNet Project" \
 #       -v $(pwd)/data:/app/data \
 #       -v $(pwd)/runs:/app/runs \
 #       -v $(pwd)/configs:/app/configs \
+#       -v $(pwd)/boenet:/app/boenet \
 #       boenet:cuda <command>
 #
 # Recommended mount command (Windows PowerShell):
@@ -563,10 +636,12 @@ LABEL maintainer="BoeNet Project" \
 #       -v ${PWD}/data:/app/data `
 #       -v ${PWD}/runs:/app/runs `
 #       -v ${PWD}/configs:/app/configs `
+#       -v ${PWD}/boenet:/app/boenet `
 #       boenet:cuda <command>
 #
 # NOTE (v1.0.3): HuggingFace cache is now stored in /app/data/.cache by default.
-# This means datasets are automatically persisted when you mount /app/data.
+# NOTE (v1.1.0): tiktoken cache is now stored in /app/data/.cache/tiktoken.
+# This means datasets and tokenizer encodings are automatically persisted.
 # No separate cache mount is needed!
 #
 # ============================================================================
@@ -582,9 +657,10 @@ LABEL maintainer="BoeNet Project" \
 #    - On Windows: Enable WSL2 GPU support in Docker Desktop settings
 #
 # 2. "Out of memory" error:
-#    - Reduce batch_size (e.g., 32 or 16)
+#    - Reduce batch_size (e.g., 16 or 8 for BPE models)
 #    - Reduce seq_len (e.g., 64)
-#    - Reduce hidden_dim (e.g., 64)
+#    - Reduce hidden_dim (e.g., 256 instead of 512)
+#    - BPE models are ~78M params vs ~150K for char - need more memory!
 #
 # 3. "Dataset not found" or "datasets library not available" error:
 #    - The datasets library should be pre-installed in this container
@@ -592,41 +668,55 @@ LABEL maintainer="BoeNet Project" \
 #    - Ensure data volume is mounted: -v $(pwd)/data:/app/data
 #    - Dataset downloads automatically on first run
 #
-# 4. "Permission denied" error for HuggingFace cache:
-#    - FIXED in v1.0.3: HuggingFace cache now uses /app/data/.cache
+# 4. "tiktoken is not available" error:
+#    - FIXED in v1.1.0: tiktoken is now pre-installed
+#    - If running locally: pip install tiktoken
+#    - Verify: python -c "import tiktoken; print(tiktoken.__version__)"
+#    - If still failing, rebuild the Docker image
+#
+# 5. "Permission denied" error for HuggingFace/tiktoken cache:
+#    - FIXED in v1.0.3/v1.1.0: Caches now use /app/data/.cache
 #    - This directory is inside the mounted volume and writable
 #    - Make sure /app/data is mounted: -v $(pwd)/data:/app/data
 #    - On Windows, ensure Docker has access to the drive
 #
-# 5. "Permission denied" error for other directories:
+# 6. "Permission denied" error for other directories:
 #    - Check volume ownership
 #    - Run: docker run --rm -v $(pwd)/data:/app/data boenet:cuda ls -la /app/data
 #    - Ensure host directories exist before mounting
 #    - On Windows: Check Docker Desktop -> Settings -> Resources -> File Sharing
 #
-# 6. Slow training:
+# 7. Slow training:
 #    - Verify GPU is being used: watch nvidia-smi
 #    - Check batch_size (larger = faster but more memory)
 #    - Use TensorFloat-32: export NVIDIA_TF32_OVERRIDE=1
+#    - BPE models take longer per epoch than char models (more params)
 #
-# 7. Text generation produces garbage:
+# 8. Text generation produces garbage:
 #    - Model may not be trained enough (increase epochs)
 #    - Try lower temperature (0.5-0.8)
 #    - Use top_k or top_p sampling
+#    - BPE models should produce much better text than char models
 #
-# 8. HuggingFace download issues:
+# 9. HuggingFace/tiktoken download issues:
 #    - Check internet connectivity
 #    - Try setting HF_DATASETS_OFFLINE=1 if datasets are already cached
 #    - Cache is stored in /app/data/.cache (persists with volume mount)
+#    - tiktoken downloads encoding files on first use to /app/data/.cache/tiktoken
 #
-# 9. "trust_remote_code is not supported anymore" warning:
-#    - FIXED in data_utils.py v2.0.0: Removed deprecated parameter
-#    - This warning is harmless and can be ignored in older versions
+# 10. "trust_remote_code is not supported anymore" warning:
+#     - FIXED in data_utils.py v2.0.0: Removed deprecated parameter
+#     - This warning is harmless and can be ignored in older versions
 #
-# 10. Windows-specific issues:
+# 11. Windows-specific issues:
 #     - Use ${PWD} instead of $(pwd) in PowerShell
 #     - Use %cd% in CMD
 #     - Ensure Docker Desktop is running
 #     - Enable WSL2 backend for best performance
+#
+# 12. BPE tokenizer issues:
+#     - Verify tiktoken is installed: python -c "import tiktoken"
+#     - Verify encoding: python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+#     - If using --tokenizer_type char, tiktoken is not needed
 #
 # ============================================================================
