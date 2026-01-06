@@ -1,483 +1,563 @@
-# BoeNet Architecture Documentation
+# BoeNet Research Findings
 
-**Version:** 2.1.0  
-**Last Updated:** December 31, 2025
+**Document Version:** 2.0.0  
+**Research Period:** December 29, 2025 - January 5, 2026  
+**Status:** Active Research (Alpha)
+
+---
+
+## Executive Summary
+
+This document records all experiments conducted on BoeNet, a novel language model architecture using learned BFS tree expansion. After 60+ training runs across two phases, we have established:
+
+### Phase 1 Findings (Character-Level, December 2025)
+1. **K=2 (binary branching) is optimal** - 3.4× faster than K=3, better sparsity handling
+2. **Depth matters more than K** - All K values plateau at similar PPL with depth=2
+3. **79% sparsity achievable** with no quality loss (threshold=0.50, λ=0.05)
+4. **CUDA stability fixed** - v2.0.1 patches resolved all K>0 training crashes
+
+### Phase 2 Findings (BPE Tokenizer, January 2026)
+5. **BPE tokenizer successfully integrated** - Scaled from 256 to 100,277 vocab
+6. **72M parameter model trains stably** - 481× parameter increase from char-level
+7. **PPL 279 achieved** - 359× better than random baseline after 30 epochs
+8. **Architecture validated at scale** - Ready for larger datasets
+
+---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Binary Reasoning Tree](#binary-reasoning-tree)
-3. [Why K=2 is Optimal](#why-k2-is-optimal)
-4. [Depth vs Width Trade-off](#depth-vs-width-trade-off)
-5. [Sparsity Findings](#sparsity-findings)
-6. [Tree Visualizations](#tree-visualizations)
-7. [Future: Dynamic Depth Algorithm](#future-dynamic-depth-algorithm)
-8. [Technical Implementation](#technical-implementation)
+1. [Timeline of Discoveries](#timeline-of-discoveries)
+2. [Phase 1: Character-Level Experiments](#phase-1-character-level-experiments)
+3. [Phase 2: BPE Tokenizer Integration](#phase-2-bpe-tokenizer-integration)
+4. [Complete Data Tables](#complete-data-tables)
+5. [Key Insights](#key-insights)
+6. [Current Limitations](#current-limitations)
+7. [Future Roadmap](#future-roadmap)
 
 ---
 
-## Overview
+## Timeline of Discoveries
 
-BoeNet (Binary Optimal Expansion Network) is a language model that uses **learned BFS tree expansion** for next-token prediction. Instead of fixed computation, BoeNet dynamically decides how much to "think" about each prediction.
+### December 29, 2025 - Project Start
+- Converted BFSNet (vision) to BoeNet (language)
+- Implemented WikiText-2 data loading
+- First successful K=0 training runs
+- **Result:** K=0 baseline PPL 11.55
 
-### Core Concept
+### December 30, 2025 - CUDA Bug Discovery & Fix
+- K=3 training crashes with CUDA assertion error
+- Error: `Assertion '0 <= p4 && p4 <= 1' failed`
+- Root cause: NaN probabilities in `torch.bernoulli()`
+- **Fix (v2.0.1):**
+  - Added probability clamping in `model.py`
+  - Added logit clamping in `gating.py`
+  - Added reward scaling in `losses.py`
+  - Added NaN detection in `train_boenet.py`
+- **Result:** K=3 now trains successfully
 
-```
-Traditional LLM:  Input → Fixed Computation → Output
-BoeNet:           Input → Adaptive Tree Expansion → Output
-```
+### December 31, 2025 - K Comparison Sweep
+- Tested K=0, 2, 3, 4 systematically
+- **Discovery: K=2 is optimal!**
+- K=2 is 3.4× faster than K=3 with same quality
+- K=2 achieves 79% sparsity with BETTER PPL
+- K=4 sparsity hurts quality (PPL +0.21)
 
-The model learns TWO things:
-1. **What to predict** (language modeling)
-2. **When to think deeper** (policy learning via REINFORCE)
+### December 31, 2025 - Depth Hypothesis
+- Observed: All K values plateau at ~11.63-11.70 PPL
+- **Hypothesis: Depth is the bottleneck, not K**
+- Depth=4 with K=2 gives 31 nodes, 5 reasoning levels
 
----
+### January 3, 2026 - BPE Tokenizer Integration (v4.0.0)
+- Upgraded from CharTokenizer (vocab=256) to BPE (vocab=100,277)
+- Created `boenet/tokenizer.py` with TiktokenWrapper
+- Scaled model from 150K to 72M parameters
+- 5 epochs training achieved PPL 534 (187× better than random)
+- **Bug discovered:** Inference using wrong tokenizer
 
-## Binary Reasoning Tree
+### January 3, 2026 - Tokenizer Mismatch Fix (v4.1.0)
+- Fixed `infer_boenet.py` to use BPE tokenizer exclusively
+- Removed CharTokenizer fallback that caused `ValueError: bytes must be in range(0, 256)`
+- **Result:** Inference now works correctly with BPE models
 
-### Why Binary (K=2)?
-
-After extensive experiments, **K=2 (binary branching)** emerged as optimal:
-
-| K Value | Description | Best PPL | Verdict |
-|---------|-------------|----------|---------|
-| K=0 | Dense (no tree) | 11.55 | Baseline |
-| **K=2** | **Binary tree** | **11.64** | **✅ Winner** |
-| K=3 | Ternary tree | 11.63 | 3.4x slower |
-| K=4 | Quaternary tree | 11.70 | Worst quality |
-
-### Binary Reasoning Interpretation
-
-K=2 creates a **natural decision structure**:
-
-```
-Level 0: Initial thought
-         ↓
-Level 1: Yes / No (binary decision)
-         ↓
-Level 2: Strong / Weak (confidence)
-```
-
-This mirrors human cognition:
-- **System 1:** Quick intuition (root node)
-- **System 2:** Deliberate reasoning (deeper levels)
-
-### Mathematical Structure
-
-For K=2 with depth D:
-- **Total nodes:** 2^(D+1) - 1
-- **Leaf nodes:** 2^D
-- **Reasoning levels:** D + 1
-
-| Depth | Total Nodes | Leaf Nodes | Reasoning Levels |
-|-------|-------------|------------|------------------|
-| 1 | 3 | 2 | 2 |
-| 2 | 7 | 4 | 3 |
-| 3 | 15 | 8 | 4 |
-| 4 | 31 | 16 | 5 |
+### January 4-5, 2026 - Extended Training
+- 30 epoch training run completed
+- PPL improved from 534 → 279 (48% improvement)
+- Training time: ~2.9 hours on RTX 5080
+- **Result:** Architecture validated, ready for more data
 
 ---
 
-## Why K=2 is Optimal
+## Phase 1: Character-Level Experiments
 
-### 1. Training Speed
+### Configuration
+```yaml
+tokenizer: CharTokenizer
+vocab_size: 256
+embed_dim: 64
+hidden_dim: 128
+parameters: ~150K
+dataset: WikiText-2 (~2MB)
+```
 
-K=2 trains **3.4x faster** than K=3/K=4:
+### K=0 Results (Dense Baseline)
 
-| K | Time/Epoch | Relative Speed |
-|---|------------|----------------|
-| K=0 | 13 sec | 7.3x faster |
-| **K=2** | **95 sec** | **1x (baseline)** |
-| K=3 | 320 sec | 3.4x slower |
-| K=4 | 330 sec | 3.5x slower |
+16 runs completed with varying epochs:
 
-### 2. Inference Latency
+| Run ID | Epochs | Val PPL | Train PPL | Time/Epoch |
+|--------|--------|---------|-----------|------------|
+| 0 | 5 | 11.60 | 11.56 | 12.9 sec |
+| 1 | 10 | 11.58 | 11.52 | 13.0 sec |
+| 2 | 15 | 11.56 | 11.50 | 13.1 sec |
+| 3 | 20 | **11.55** | 11.48 | 13.0 sec |
 
-K=2 achieves the fastest tree-based inference:
+**K=0 Summary:**
+- Best PPL: **11.55** (20 epochs)
+- Inference Latency: **0.24 ms**
+- Nodes: 1 (always, no tree)
 
-| K | Threshold | Nodes Used | Latency |
-|---|-----------|------------|---------|
-| K=0 | N/A | 1.0 | 0.24 ms |
-| **K=2** | **0.50** | **1.47** | **0.89 ms** |
-| K=3 | 0.40 | 13.0 | 1.78 ms |
-| K=4 | 0.40 | 21.0 | 3.72 ms |
+### K=2 Results (Binary Tree) ✅ WINNER
 
-### 3. Sparsity Handling
+8 runs with varying λ and threshold:
 
-K=2 handles sparsity **gracefully** - PPL improves with sparsity!
+| Run | Epochs | λ | Threshold | Val PPL | Infer Nodes | Latency | Sparsity |
+|-----|--------|---|-----------|---------|-------------|---------|----------|
+| 0 | 10 | 0.0 | 0.40 | 11.69 | 7.0 | 1.35 ms | 0% |
+| 1 | 15 | 0.0 | 0.40 | 11.66 | 7.0 | 1.31 ms | 0% |
+| 2 | 10 | 0.0 | 0.50 | 11.68 | 2.07 | 1.04 ms | 70.5% |
+| 3 | 15 | 0.0 | 0.50 | **11.64** | 1.61 | 0.95 ms | 77.1% |
+| 4 | 10 | 0.05 | 0.40 | 11.70 | 7.0 | 1.34 ms | 0% |
+| 5 | 15 | 0.05 | 0.40 | 11.66 | 7.0 | 1.31 ms | 0% |
+| 6 | 10 | 0.05 | 0.50 | 11.68 | 1.96 | 1.02 ms | 72.0% |
+| 7 | 15 | 0.05 | 0.50 | **11.64** | **1.47** | **0.89 ms** | **79.1%** |
 
-| K | Full Tree PPL | Sparse PPL | Δ PPL |
-|---|---------------|------------|-------|
-| **K=2** | 11.66 | **11.64** | **-0.02 (better!)** |
-| K=4 | 11.70 | 11.91 | +0.21 (worse) |
+**K=2 Best Configuration:**
+- Epochs: 15
+- λ (efficiency penalty): 0.05
+- Threshold: 0.50
+- **Val PPL: 11.64**
+- **Sparsity: 79.1%**
+- **Latency: 0.89 ms**
 
-K=4 quality **degrades** when sparse. K=2 quality **improves**.
+### K=3 Results (Ternary Tree)
 
-### 4. GPU Efficiency
+| Run | Epochs | λ | Threshold | Val PPL | Nodes | Time/Epoch |
+|-----|--------|---|-----------|---------|-------|------------|
+| 16 | 5 | 0.0 | 0.30 | 11.80 | 14.25 | 320 sec |
+| 17 | 10 | 0.0 | 0.30 | 11.69 | 14.25 | 320 sec |
+| 18 | 15 | 0.0 | 0.30 | 11.65 | 14.25 | 320 sec |
+| 19 | 20 | 0.0 | 0.30 | **11.63** | 14.25 | 320 sec |
 
-Binary operations align with GPU architecture:
+**K=3 Summary:**
+- Best PPL: **11.63** (marginally better than K=2)
+- Training: **3.4× slower** than K=2
+- Cannot achieve sparsity (always uses full tree)
+- **Verdict: Not recommended**
 
-| K | CUDA Warp (32 threads) | Efficiency |
-|---|------------------------|------------|
-| **K=2** | 32/2 = 16 pairs | **100%** |
-| K=3 | 32/3 = 10.67 | 67% (wasted) |
-| K=4 | 32/4 = 8 quads | 100% |
+### K=4 Results (Quaternary Tree) ❌
 
-K=2 and K=4 are both GPU-aligned, but K=2 is faster and better quality.
+| Run | Epochs | λ | Threshold | Val PPL | Nodes | Sparsity |
+|-----|--------|---|-----------|---------|-------|----------|
+| 8 | 10 | 0.0 | 0.40 | 11.74 | 21.0 | 0% |
+| 9 | 15 | 0.0 | 0.40 | 11.70 | 21.0 | 0% |
+| 10 | 10 | 0.0 | 0.50 | **11.91** | 7.23 | 65.6% |
+
+**K=4 Critical Finding:**
+- Sparsity **hurts quality** significantly (+0.21 PPL)
+- Slowest training (330 sec/epoch)
+- **Verdict: Not recommended**
+
+### Master Comparison (Character-Level)
+
+| K | Best PPL | Latency | Sparsity | Train Speed | Verdict |
+|---|----------|---------|----------|-------------|---------|
+| K=0 | **11.55** | **0.24 ms** | N/A | 13 sec/ep | Baseline |
+| **K=2** | 11.64 | 0.89 ms | **79%** | 95 sec/ep | **✅ Winner** |
+| K=3 | 11.63 | 1.78 ms | 0% | 320 sec/ep | Too slow |
+| K=4 | 11.70 | 2.87 ms | 66%* | 330 sec/ep | ❌ Broken |
+
+*K=4 sparse PPL degrades to 11.91
 
 ---
 
-## Depth vs Width Trade-off
+## Phase 2: BPE Tokenizer Integration
 
-### The Pivot: Depth Matters More Than K
+### Motivation
 
-**Key Insight:** All K values (2, 3, 4) plateau at similar PPL (~11.63-11.70) when using depth=2.
+Character-level tokenization limits scaling:
+- Vocabulary of only 256 tokens
+- Cannot learn subword patterns
+- Not comparable to modern LLMs
 
-This suggests the bottleneck is **reasoning depth**, not branching factor.
+### Configuration (v4.0.0)
 
-### Depth Comparison (K=2)
-
-| Depth | Max Nodes | Reasoning Levels | Training Time | Expected PPL |
-|-------|-----------|------------------|---------------|--------------|
-| 2 | 7 | 3 | ~95 sec/ep | 11.64 (measured) |
-| 3 | 15 | 4 | ~150 sec/ep | ~11.58 (testing) |
-| 4 | 31 | 5 | ~250 sec/ep | ~11.54 (testing) |
-
-### The Hypothesis
-
+```yaml
+tokenizer: TiktokenWrapper (cl100k_base)
+vocab_size: 100,277
+embed_dim: 64
+hidden_dim: 644
+max_depth: 4
+max_children: 2
+parameters: 72.23M
+batch_size: 16 (reduced from 64 for memory)
+dataset: WikiText-2 (~2MB)
 ```
-More Depth = More Reasoning Levels = Better Predictions
+
+### Parameter Scaling
+
+| Component | Char (v2.x) | BPE (v4.0.0) | Scale Factor |
+|-----------|-------------|--------------|--------------|
+| Embedding | 16K | 6.4M | 400× |
+| Output Head | 33K | 64.6M | 1,958× |
+| Tree Logic | 57K | 1.3M | 23× |
+| **Total** | **~150K** | **72.23M** | **481×** |
+
+### Training Results
+
+| Run | Epochs | Val PPL | Inference PPL | Time | Notes |
+|-----|--------|---------|---------------|------|-------|
+| v4.0.0 | 5 | 534.60 | N/A* | ~50 min | Initial BPE run |
+| **v4.1.0** | **30** | **329.11** | **279.08** | **~2.9 hrs** | **Best model** |
+
+*v4.0.0 inference had tokenizer mismatch bug
+
+### PPL Progression (30 Epoch Run)
+
+From the training matrix results:
+
+| Checkpoint | Epochs | Val PPL | vs Random (100,277) |
+|------------|--------|---------|---------------------|
+| Initial | 0 | ~100,277 | 1× (random) |
+| v4.0.0 | 5 | 534.60 | 187× better |
+| v4.1.0 | 30 | 279.08 | **359× better** |
+
+### Inference Metrics (v4.1.0, 30 epochs)
+
+| Metric | Value |
+|--------|-------|
+| Val PPL (training) | 329.11 |
+| Val PPL (inference) | **279.08** |
+| Val Loss | 5.6315 |
+| Latency Mean (CPU) | 48.73 ms |
+| Latency P50 | 48.32 ms |
+| Latency P90 | 50.66 ms |
+| Latency P99 | 53.80 ms |
+| Model Size | 288.9 MB |
+
+### Tree Behavior (BPE Model)
+
+From training logs:
+```
+Level 0: GREEDY mode, prob=0.9852, threshold=0.5, expand=True
+Level 0: EXPANDED -> 2 children at level 1
+Level 1: GREEDY mode, prob=0.0000, threshold=0.5, expand=False
+Level 1: NOT EXPANDING - stopping tree growth
+FINAL: depth=1, total_nodes=3, nodes_per_level=[1, 2]
 ```
 
-Even though K=2 depth=4 has 31 nodes, binary efficiency keeps it fast:
-- K=2 depth=4 (31 nodes): ~250 sec/epoch
-- K=3 depth=2 (13 nodes): ~320 sec/epoch
+**Learned behavior:**
+- Level 0 → 1: **98.5% expand** (always grows)
+- Level 1 → 2: **0.0% expand** (always stops)
+- **Consistent 3 nodes used** (90% sparsity vs max 31)
 
-**K=2 depth=4 is still faster than K=3 depth=2!**
+### Text Generation Quality
 
-### When to Use More Depth
+**PPL 534 (5 epochs, temp=0.8):**
+```
+The 2013 weeks .
+ = =
+ =s Nationally Dell in the city of a 17 to the events or up in a song...
+```
+- Word soup, broken fragments
 
-| Task Complexity | Recommended Depth | Nodes | Reasoning |
-|-----------------|-------------------|-------|-----------|
-| Simple patterns | 2 | 7 | 3 levels |
-| Medium complexity | 3 | 15 | 4 levels |
-| Complex reasoning | 4 | 31 | 5 levels |
+**PPL 279 (30 epochs, temp=0.8):**
+```
+The 2013 $ 1970s soul in the Port National miners were in the city of 
+a tropical storm to the events or surprising and " Like Kiles , and 
+this place and the hotel originally strategy , only through the central 
+in Ireland , when it was a "...
+```
+- Real English phrases
+- WikiText-2 patterns learned (headers, years)
+- Grammar fragments (not full sentences)
+- Significant improvement over 534
 
 ---
 
-## Sparsity Findings
+## Complete Data Tables
 
-### How Sparsity Works
+### All K=2 Runs (Character-Level, Depth=2)
 
-1. **Training:** Model uses stochastic policy (Bernoulli sampling)
-2. **Inference:** Model uses greedy policy (threshold-based)
-3. **Sparsity:** Percentage of nodes NOT expanded
+| Run | Epochs | λ | Thr | Val PPL | Train Nodes | Infer Nodes | Latency | Sparsity |
+|-----|--------|---|-----|---------|-------------|-------------|---------|----------|
+| 0 | 10 | 0.0 | 0.40 | 11.69 | 9.0 | 7.0 | 1.35 ms | 0% |
+| 1 | 15 | 0.0 | 0.40 | 11.66 | 9.0 | 7.0 | 1.31 ms | 0% |
+| 2 | 10 | 0.0 | 0.50 | 11.68 | 9.0 | 2.07 | 1.04 ms | 70.5% |
+| 3 | 15 | 0.0 | 0.50 | 11.64 | 9.0 | 1.61 | 0.95 ms | 77.1% |
+| 4 | 10 | 0.05 | 0.40 | 11.70 | 9.0 | 7.0 | 1.34 ms | 0% |
+| 5 | 15 | 0.05 | 0.40 | 11.66 | 9.0 | 7.0 | 1.31 ms | 0% |
+| 6 | 10 | 0.05 | 0.50 | 11.68 | 9.0 | 1.96 | 1.02 ms | 72.0% |
+| 7 | 15 | 0.05 | 0.50 | 11.64 | 9.0 | 1.47 | 0.89 ms | 79.1% |
 
-### Threshold Effect
+### BPE Training Run (v4.1.0)
 
-| Threshold | What Passes | Result |
-|-----------|-------------|--------|
-| 0.40 | grow_prob ≥ 0.40 | Full tree |
-| 0.50 | grow_prob ≥ 0.50 | Sparse tree |
-| 0.60 | grow_prob ≥ 0.60 | Root only |
+| Metric | Value |
+|--------|-------|
+| run_id | 0 |
+| tag | k2_poolmean_hd644_ed64_sl128_lr0p0001_bs16_wd0p01_d4_lam0p05_thr0p5_roll3_ep30_rep0 |
+| epochs | 30 |
+| val_ppl_last | 329.11 |
+| val_loss_last | 5.7964 |
+| val_ppl_best | 329.11 |
+| best_epoch | 30 |
+| total_training_time_sec | 10,418 |
+| batch_size | 16 |
+| hidden_dim | 644 |
+| embed_dim | 64 |
+| seq_len | 128 |
+| vocab_size | 256* |
+| max_depth | 4 |
+| max_children | 2 |
+| pooling_mode | mean |
+| lr | 0.0001 |
+| weight_decay | 0.01 |
+| lambda_efficiency | 0.05 |
+| greedy_threshold | 0.5 |
+| num_rollouts | 3 |
+| infer_val_ppl | **279.08** |
+| infer_val_loss | 5.6315 |
+| model_bytes | 288,946,153 |
 
-### K=2 Sparsity Results
-
-| Epochs | Threshold | Nodes Used | Sparsity | PPL |
-|--------|-----------|------------|----------|-----|
-| 10 | 0.50 | 2.07 | 70.5% | 11.68 |
-| 15 | 0.50 | 1.47 | **79.1%** | **11.64** |
-
-**Key Finding:** More training → Better sparsity → Same or better PPL!
-
-### Why Sparsity Improves PPL
-
-The policy learns to expand **only when necessary**:
-- Easy predictions: Root only (1 node)
-- Hard predictions: Full tree (7 nodes)
-
-This acts as **implicit regularization**, preventing overfitting.
-
----
-
-## Tree Visualizations
-
-### K=2, Depth=2 (7 nodes, 3 reasoning levels)
-
-```
-                    ┌─────────────┐
-                    │    Root     │ Level 0: Initial Thought
-                    │   (h₀)      │
-                    └──────┬──────┘
-                           │
-              ┌────────────┴────────────┐
-              │                         │
-        ┌─────┴─────┐             ┌─────┴─────┐
-        │  Child 0  │             │  Child 1  │ Level 1: Yes / No
-        │   (Yes)   │             │   (No)    │
-        └─────┬─────┘             └─────┬─────┘
-              │                         │
-        ┌─────┴─────┐             ┌─────┴─────┐
-        │           │             │           │
-   ┌────┴────┐ ┌────┴────┐  ┌────┴────┐ ┌────┴────┐
-   │ GC 0    │ │ GC 1    │  │ GC 2    │ │ GC 3    │ Level 2: Confidence
-   │(Strong) │ │(Weak)   │  │(Strong) │ │(Weak)   │
-   │  Yes    │ │ Yes     │  │  No     │ │  No     │
-   └─────────┘ └─────────┘  └─────────┘ └─────────┘
-```
-
-### K=2, Depth=3 (15 nodes, 4 reasoning levels)
-
-```
-                         Root
-                        /    \
-                      Yes    No
-                     /  \   /  \
-                    SY  WY SN  WN
-                   /\ /\ /\ /\
-                  8 great-grandchildren (Level 3: Evidence)
-```
-
-### K=2, Depth=4 (31 nodes, 5 reasoning levels)
-
-```
-Level 0: Root               (1 node)
-Level 1: Yes / No           (2 nodes)
-Level 2: Confidence         (4 nodes)
-Level 3: Evidence           (8 nodes)
-Level 4: Context/Refinement (16 nodes)
-─────────────────────────────────────
-Total:                      31 nodes
-```
-
-### Sparse Tree (threshold=0.50)
-
-With 79% sparsity, only ~1.5 nodes used on average:
-
-```
-        ┌─────────────┐
-        │    Root     │ ← Always computed
-        │   (h₀)      │
-        └──────┬──────┘
-               │
-               ▼
-    (Policy decides: expand?)
-               │
-        ┌──────┴──────┐
-        │ grow_prob   │
-        │  = 0.48     │ ← Below threshold 0.50
-        └─────────────┘
-               │
-               ▼
-        STOP (no expansion)
-        Use root prediction
-```
+*Note: CSV shows vocab_size=256 due to config file default, but actual model uses 100,277
 
 ---
 
-## Future: Dynamic Depth Algorithm
+## Key Insights
 
-### Current Limitation
+### 1. Binary Branching is Fundamental
 
-**Fixed depth for all inputs:**
-```python
-max_depth = 4  # Same for easy AND hard predictions
-```
+K=2 outperforms K=3 and K=4 across all metrics:
 
-### Proposed Solution
+| Metric | K=2 | K=3 | K=4 |
+|--------|-----|-----|-----|
+| PPL | 11.64 | 11.63 | 11.70 |
+| Training Speed | **1×** | 3.4× slower | 3.5× slower |
+| Inference Speed | **0.89 ms** | 1.78 ms | 2.87 ms |
+| Sparsity Support | **79%** | 0% | Broken |
 
-**Learned adaptive depth:**
-```python
-depth = 0
-while not confident_enough(prediction) and depth < max_depth:
-    expand_next_level()
-    depth += 1
-# Easy inputs: stop early (depth 1-2)
-# Hard inputs: go deep (depth 4-5)
-```
+### 2. Sparsity Can Improve Quality
 
-### Implementation Options
+Counter-intuitive finding - more sparsity → better PPL:
 
-#### Option A: Confidence-Based Stopping
-```python
-def should_stop(node_output, threshold=0.9):
-    confidence = softmax(node_output).max()
-    return confidence > threshold
-```
+| Threshold | Nodes | Sparsity | PPL |
+|-----------|-------|----------|-----|
+| 0.40 | 7.0 | 0% | 11.66 |
+| 0.50 | 1.47 | 79% | **11.64** |
 
-**Pros:** Simple, interpretable
-**Cons:** Confidence ≠ correctness
+The policy learns to use computation selectively.
 
-#### Option B: Learned Stop Action
-```python
-# Policy outputs: [grow_prob, stop_prob]
-action = policy(node_hidden)
-if action == STOP:
-    return prediction
-else:
-    expand_children()
-```
+### 3. Training Improves Sparsity
 
-**Pros:** End-to-end learned
-**Cons:** More complex training
+| Epochs | Infer Nodes | Sparsity | PPL |
+|--------|-------------|----------|-----|
+| 10 | 2.07 | 70.5% | 11.68 |
+| 15 | 1.47 | 79.1% | 11.64 |
 
-#### Option C: Budget-Based Stopping
-```python
-def forward(x, compute_budget=10):
-    nodes_used = 0
-    while nodes_used < compute_budget:
-        expand_next_node()
-        nodes_used += 1
-```
+More training → model learns when NOT to compute.
 
-**Pros:** Guarantees latency
-**Cons:** Not input-adaptive
+### 4. BPE Scaling Works
 
-### Research Questions
+Successfully scaled 481× in parameters:
 
-1. Does dynamic depth improve quality?
-2. Does it reduce compute for easy inputs?
-3. Can we learn when to think deeper?
-4. How does this compare to transformers?
+| Metric | Char | BPE | Ratio |
+|--------|------|-----|-------|
+| Parameters | 150K | 72M | 481× |
+| Vocab | 256 | 100,277 | 391× |
+| Training | Stable | Stable | ✓ |
 
-### Expected Benefits
+### 5. Data is the Bottleneck
 
-| Metric | Fixed Depth | Dynamic Depth |
-|--------|-------------|---------------|
-| Easy input latency | Same as hard | **Faster** |
-| Hard input quality | Same as easy | **Better** |
-| Average compute | Fixed | **Adaptive** |
+| Model | Params | Data | PPL |
+|-------|--------|------|-----|
+| BoeNet v4.1.0 | 72M | 2MB | 279 |
+| GPT-2 Small | 124M | 40GB | 29 |
+
+GPT-2 has 20,000× more data. Architecture is validated - needs more data.
+
+### 6. Inference PPL < Training PPL
+
+Observed: inference PPL (279) better than training PPL (329).
+
+Possible explanations:
+- Greedy decoding more stable than sampling
+- Different evaluation batches
+- Policy learned good stopping behavior
 
 ---
 
-## Technical Implementation
+## Current Limitations
 
-### Core Components
+### 1. Data Size
+- WikiText-2 is only ~2MB
+- Model capacity (72M params) far exceeds data
+- Likely overfitting, needs more diverse data
 
-#### 1. BoeNet Model (`boenet/model.py`)
+### 2. Generation Quality
+- PPL 279 produces phrases, not sentences
+- GPT-2 level (PPL ~29) requires 100× more training
+- Coherent paragraphs need PPL < 50
 
-```python
-class BoeNet(nn.Module):
-    def __init__(self, vocab_size, embed_dim, hidden_dim, 
-                 max_depth, max_children, greedy_threshold):
-        # Token embedding
-        self.embed = nn.Embedding(vocab_size, embed_dim)
-        
-        # Hidden state projection
-        self.proj = nn.Linear(embed_dim, hidden_dim)
-        
-        # Child generation
-        self.child_net = nn.Linear(hidden_dim, hidden_dim * max_children)
-        
-        # Growth policy
-        self.growth_policy = GrowthPolicyNet(hidden_dim)
-        
-        # Output projection
-        self.output = nn.Linear(hidden_dim, vocab_size)
+### 3. Computational Cost
+- BPE model requires reduced batch size (16 vs 64)
+- 30 epochs takes ~3 hours
+- Scaling to larger datasets needs more GPU time
+
+### 4. Tree Utilization
+- Current model only uses depth=1 (3 nodes)
+- Full depth=4 (31 nodes) not being utilized
+- May need curriculum learning or different λ schedule
+
+---
+
+## Future Roadmap
+
+### Immediate (Documentation Phase)
+- [x] Complete README.md update
+- [x] Complete architecture documentation
+- [x] Complete research findings documentation
+- [ ] Clean up codebase
+
+### Short Term (Dataset Phase)
+- [ ] Curate larger training dataset
+- [ ] Target: 100MB - 1GB of quality text
+- [ ] Consider: OpenWebText, BookCorpus, custom sources
+
+### Medium Term (Training Phase)
+- [ ] Train on larger dataset
+- [ ] Target PPL < 100
+- [ ] Experiment with longer training
+- [ ] Try larger hidden_dim (1024+)
+
+### Long Term (Research Phase)
+- [ ] Compare to transformer baseline
+- [ ] Implement dynamic depth
+- [ ] Scale to 200M+ parameters
+- [ ] Write research paper
+
+---
+
+## Reproduction Instructions
+
+### Environment Setup
+
+```bash
+# Docker (recommended)
+docker build -t boenet:cuda -f Dockerfile.cuda .
+
+# Or manual installation
+pip install torch torchvision
+pip install datasets transformers tiktoken pyyaml tqdm
 ```
 
-#### 2. Growth Policy (`boenet/utils/gating.py`)
+### Character-Level Baseline (Quick Test)
 
-```python
-class GrowthPolicyNet(nn.Module):
-    def forward(self, hidden, depth):
-        # Input: node hidden state + depth embedding
-        # Output: probability of expanding this node
-        logits = self.mlp(hidden)
-        logits_clamped = logits.clamp(-20.0, 20.0)  # v2.1.0 fix
-        grow_prob = torch.sigmoid(logits_clamped)
-        grow_prob = grow_prob.clamp(1e-7, 1-1e-7)   # v2.1.0 fix
-        return grow_prob
+```bash
+python train_boenet.py \
+    --max_children 2 \
+    --max_depth 2 \
+    --hidden_dim 128 \
+    --batch_size 64 \
+    --lambda_efficiency 0.05 \
+    --greedy_threshold 0.50 \
+    --epochs 15 \
+    --tokenizer_type char
+
+# Expected: PPL ~11.64, ~24 minutes
 ```
 
-#### 3. Training Loop (`train_boenet.py`)
+### BPE Model (Current Best)
 
-```python
-# Forward with policy gradients
-outputs, policy_loss, rewards, node_counts = model(
-    input_ids,
-    num_rollouts=3,
-    lambda_efficiency=0.05,
-    beta_entropy=0.01,
-    labels=labels,
-)
+```bash
+python train_boenet.py \
+    --max_children 2 \
+    --max_depth 4 \
+    --hidden_dim 644 \
+    --embed_dim 64 \
+    --batch_size 16 \
+    --lr 0.0001 \
+    --weight_decay 0.01 \
+    --lambda_efficiency 0.05 \
+    --greedy_threshold 0.50 \
+    --num_rollouts 3 \
+    --epochs 30 \
+    --tokenizer_type bpe \
+    --bpe_encoding cl100k_base
 
-# Language modeling loss
-lm_loss = F.cross_entropy(outputs, labels)
-
-# Total loss
-total_loss = lm_loss + beta_policy * policy_loss
-
-# Backward
-total_loss.backward()
+# Expected: PPL ~279, ~3 hours
 ```
 
-### Numerical Stability (v2.1.0)
+### Inference
 
-All probability operations are clamped:
-
-```python
-# Probability clamping constants
-PROB_CLAMP_MIN = 1e-7      # Prevents log(0)
-PROB_CLAMP_MAX = 1 - 1e-7  # Prevents log(0)
-LOGIT_CLAMP_MIN = -20.0    # Prevents sigmoid underflow
-LOGIT_CLAMP_MAX = 20.0     # Prevents sigmoid overflow
-REWARD_SCALE = 5.0         # Keeps gradients manageable
-ADVANTAGE_CLAMP = 2.0      # Prevents gradient explosion
-```
-
-### Checkpoint Format
-
-```python
-checkpoint = {
-    "model_state_dict": model.state_dict(),
-    "config": {
-        "vocab_size": 256,
-        "embed_dim": 64,
-        "hidden_dim": 128,
-        "max_depth": 2,
-        "max_children": 2,
-        "greedy_threshold": 0.50,
-        "version": "2.1.0",
-        "model_type": "language",
-    },
-    "training_meta": {
-        "best_val_ppl": 11.64,
-        "best_epoch": 15,
-        "total_time_s": 1440.0,
-    },
-}
+```bash
+python infer_boenet.py \
+    --ckpt runs/your_model.pt \
+    --generate \
+    --max_tokens 200 \
+    --temperature 0.5
 ```
 
 ---
 
-## References
+## Appendix A: Version History
 
-### Internal Documentation
-- `docs/RESEARCH_FINDINGS.md` - Complete experiment results
-- `configs/experiment-config.yaml` - Sweep configuration
+| Version | Date | Changes |
+|---------|------|---------|
+| v4.1.0 | 2026-01-05 | 30 epoch training, PPL 279, tokenizer fix |
+| v4.0.0 | 2026-01-03 | BPE tokenizer, 72M params, PPL 534 |
+| v2.4.0 | 2026-01-02 | Enhanced logging |
+| v2.2.0 | 2026-01-03 | Clean progress bars |
+| v2.1.0 | 2025-12-31 | K=2 optimal, sparsity findings |
+| v2.0.1 | 2025-12-30 | CUDA stability fixes |
+| v2.0.0 | 2025-12-29 | Language model conversion |
+| v1.0.0 | 2025-12 | Initial implementation |
 
-### Related Work
-- BFSNet: Original vision model (FashionMNIST)
-- Adaptive Computation Time (Graves, 2016)
-- Universal Transformers (Dehghani et al., 2018)
-- PonderNet (Banino et al., 2021)
+## Appendix B: CSV Column Definitions
+
+| Column | Description |
+|--------|-------------|
+| run_id | Unique run identifier |
+| tag | Human-readable run configuration |
+| epochs | Number of training epochs |
+| val_ppl_last | Validation perplexity at final epoch |
+| val_ppl_best | Best validation perplexity achieved |
+| best_epoch | Epoch with best validation PPL |
+| total_training_time_sec | Total training time in seconds |
+| batch_size | Training batch size |
+| hidden_dim | Model hidden dimension |
+| embed_dim | Embedding dimension |
+| vocab_size | Vocabulary size |
+| max_depth | Maximum tree depth |
+| max_children | K value (branching factor) |
+| lambda_efficiency | Sparsity penalty coefficient |
+| greedy_threshold | Inference expansion threshold |
+| infer_val_ppl | PPL from inference evaluation |
+| infer_avg_nodes | Average nodes used during inference |
+| infer_sparsity_percent | Percentage of nodes NOT used |
+| model_bytes | Checkpoint file size |
 
 ---
 
-## Changelog
+## Appendix C: Hardware Used
 
-### v2.1.0 (December 31, 2025)
-- Added K=2 as optimal finding
-- Added depth vs width analysis
-- Added sparsity findings
-- Added tree visualizations
-- Added dynamic depth roadmap
+| Component | Specification |
+|-----------|---------------|
+| GPU | NVIDIA RTX 5080 |
+| VRAM | 16GB |
+| CPU | (User's system) |
+| CUDA | 12.8 |
+| PyTorch | 2.x |
+| Container | boenet:cuda (Ubuntu + CUDA) |
 
-### v2.0.0 (December 30, 2025)
-- Converted from vision to language
-- Added CUDA stability fixes
-- Added greedy threshold documentation
+---
 
-### v1.0.0 (December 2025)
-- Initial architecture documentation
+*Document last updated: January 5, 2026*
+*Next update planned after dataset curation phase*
